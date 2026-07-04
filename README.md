@@ -122,3 +122,27 @@ history.json       generation history (git-ignored, created at runtime)
 images.json        saved-media gallery manifest (git-ignored, created at runtime)
 projects.json      project list (git-ignored, created at runtime)
 ```
+
+## License & Disclaimer
+
+This project is licensed under the [MIT License](LICENSE). In plain English:
+
+**This software is provided "as is", without warranty of any kind, and you use
+it entirely at your own risk.** By downloading or running it you accept that
+the author is **not responsible or liable** for:
+
+- any damage to your computer, files, or data;
+- any charges, credit consumption, or costs incurred on your kie.ai account
+  (every generation spends real credits — the cost estimates shown in the app
+  are approximations, not guarantees);
+- anything you create, generate, publish, or otherwise do with this software
+  or its outputs — that's on you, including complying with kie.ai's and
+  ByteDance's terms of service and the laws that apply to you;
+- the safekeeping of your API key. Your key is stored in a local `.env` file
+  and sent only to kie.ai. If you commit it, share it, screenshot it, paste it
+  somewhere public, or otherwise leak it, anyone who has it can spend your
+  credits. Guard it accordingly.
+
+This is an unofficial hobby tool. It is **not affiliated with, endorsed by, or
+supported by kie.ai or ByteDance**. Their APIs, models, pricing, and terms can
+change at any time and break this app without notice.

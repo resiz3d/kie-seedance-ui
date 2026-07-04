@@ -166,3 +166,11 @@ keep your key, media, and history:
 - the `video` and `images` folders
 
 Then run `npm install` once in the new folder and `npm start` as usual.
+
+## One last thing
+
+This is free hobby software, provided **as is, with no warranty, at your own
+risk** — see the [License & Disclaimer](README.md#license--disclaimer) in the
+README. In short: you're responsible for your own computer, your kie.ai
+credits and what they get spent on, whatever you create with the app, and
+keeping your API key secret.

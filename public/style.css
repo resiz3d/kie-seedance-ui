@@ -696,6 +696,25 @@ video,
   max-width: 140px;
 }
 
+/* --- footer disclaimer --- */
+.app-footer {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.app-footer a {
+  color: var(--muted);
+  text-decoration: underline;
+}
+
+.app-footer a:hover {
+  color: var(--text);
+}
+
 @media (max-width: 540px) {
   .row {
     grid-template-columns: 1fr;
