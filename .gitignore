@@ -1,0 +1,9 @@
+node_modules/
+.env
+
+# user-generated data (downloaded videos, saved reference images, history)
+video/
+images/
+history.json
+images.json
+projects.json

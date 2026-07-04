@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seedance 2</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="offline" class="offline-banner hidden">
+      ⚠ Server not reachable — is <code>npm start</code> still running?
+    </div>
+    <main>
+      <header>
+        <div>
+          <h1>Seedance 2</h1>
+          <p class="sub">Generate video with the Seedance 2 model</p>
+        </div>
+        <div class="header-right">
+          <div class="project-pill" title="Active project">
+            <select id="projectSelect"></select>
+            <button type="button" id="newProject" class="link-btn" title="New project">＋</button>
+            <button type="button" id="renameProject" class="link-btn" title="Rename project">✎</button>
+            <button type="button" id="deleteProject" class="link-btn" title="Delete project (contents move to Default)">🗑</button>
+          </div>
+          <div class="credits" id="credits" title="Account credit balance">
+            <span class="credits-label">Credits</span>
+            <span class="credits-value" id="creditsValue">…</span>
+            <button type="button" id="refreshCredits" class="link-btn" title="Refresh">↻</button>
+          </div>
+        </div>
+      </header>
+
+      <form id="genForm">
+        <label>
+          Model
+          <select id="model">
+            <option value="bytedance/seedance-2" selected>Seedance 2</option>
+            <option value="bytedance/seedance-2-fast">Seedance 2 Fast (480p/720p only)</option>
+            <option value="seedream/5-lite-image-to-image">Seedream 5.0 Lite (image-to-image)</option>
+            <option value="seedream/5-lite-text-to-image">Seedream 5.0 Lite (text-to-image)</option>
+          </select>
+        </label>
+
+        <label>
+          Prompt
+          <textarea
+            id="prompt"
+            rows="4"
+            placeholder="Describe the video you want to generate. Reference images with @Image1, @Image2, etc."
+          ></textarea>
+        </label>
+
+        <div class="field" id="imageField">
+          <div class="field-head">
+            <span>Reference images <span class="hint">(drag files or URLs in, or click to browse)</span></span>
+            <button type="button" id="clear-image" class="link-btn hidden">Clear all</button>
+          </div>
+          <div id="dz-image" class="dropzone">
+            <div id="thumbs-image" class="thumbs"></div>
+            <p class="dz-hint">Drop images here or <span class="browse">browse</span></p>
+            <input id="file-image" type="file" accept="image/png,image/jpeg,image/jpg,image/webp" multiple hidden />
+          </div>
+        </div>
+
+        <div class="field" id="videoField">
+          <div class="field-head">
+            <span>Reference videos <span class="hint">(total ≤ 15s, ≤ 50MB each)</span></span>
+            <button type="button" id="clear-video" class="link-btn hidden">Clear all</button>
+          </div>
+          <div id="dz-video" class="dropzone">
+            <div id="thumbs-video" class="thumbs"></div>
+            <p class="dz-hint">Drop videos here or <span class="browse">browse</span></p>
+            <input id="file-video" type="file" accept="video/mp4,video/quicktime,video/x-matroska" multiple hidden />
+          </div>
+        </div>
+
+        <div class="field" id="audioField">
+          <div class="field-head">
+            <span>Reference audio <span class="hint">(total ≤ 15s, ≤ 15MB each)</span></span>
+            <button type="button" id="clear-audio" class="link-btn hidden">Clear all</button>
+          </div>
+          <div id="dz-audio" class="dropzone">
+            <div id="thumbs-audio" class="thumbs"></div>
+            <p class="dz-hint">Drop audio here or <span class="browse">browse</span></p>
+            <input id="file-audio" type="file" accept="audio/mpeg,audio/wav,audio/x-wav,audio/aac,audio/mp4,audio/ogg" multiple hidden />
+          </div>
+        </div>
+
+        <details id="galleryWrap" class="gallery-wrap">
+          <summary>Gallery <span class="hint" id="galleryCount"></span></summary>
+          <p class="dz-hint" id="galleryEmpty">No saved media yet.</p>
+          <div id="gallery" class="thumbs gallery"></div>
+        </details>
+
+        <div class="row">
+          <label id="resolutionField">
+            Resolution
+            <select id="resolution">
+              <option value="480p">480p</option>
+              <option value="720p" selected>720p</option>
+              <option value="1080p">1080p</option>
+              <option value="4k">4K</option>
+            </select>
+          </label>
+
+          <label id="qualityField" class="hidden">
+            Quality
+            <select id="quality">
+              <option value="basic" selected>Basic (2K)</option>
+              <option value="high">High (4K)</option>
+            </select>
+          </label>
+
+          <label>
+            Aspect ratio
+            <select id="aspect_ratio">
+              <option value="16:9" selected>16:9</option>
+              <option value="4:3">4:3</option>
+              <option value="1:1">1:1</option>
+              <option value="3:4">3:4</option>
+              <option value="9:16">9:16</option>
+              <option value="21:9">21:9</option>
+            </select>
+          </label>
+
+          <label id="durationField">
+            Duration (s)
+            <input id="duration" type="number" min="4" max="15" step="1" value="15" />
+          </label>
+        </div>
+
+        <div class="checks">
+          <label class="inline" id="genAudioField">
+            <input id="generate_audio" type="checkbox" checked /> Generate audio
+          </label>
+          <label class="inline" id="webSearchField">
+            <input id="web_search" type="checkbox" /> Web search
+          </label>
+          <label class="inline">
+            <input id="nsfw_checker" type="checkbox" /> NSFW checker
+          </label>
+        </div>
+
+        <div class="submit-row">
+          <button type="submit" id="submitBtn">Generate</button>
+          <span class="estimate" id="estimate"></span>
+        </div>
+      </form>
+
+      <section id="status" class="hidden">
+        <div class="status-line">
+          <span class="spinner" id="spinner"></span>
+          <span id="statusText">Submitting…</span>
+        </div>
+        <div id="taskId" class="task-id"></div>
+      </section>
+
+      <section id="result" class="hidden">
+        <video id="video" controls></video>
+        <img id="resultImage" class="hidden" alt="Generated image" />
+        <p id="resultMeta" class="hist-meta"></p>
+        <a id="downloadLink" href="#" target="_blank" rel="noopener">Open result in new tab</a>
+      </section>
+
+      <pre id="error" class="hidden"></pre>
+
+      <section id="historySection">
+        <div class="hist-head">
+          <h2>History</h2>
+          <div class="hist-head-actions">
+            <button type="button" id="openFolder" class="btn-secondary" title="Open the output folder in Explorer">📂 Open folder</button>
+            <select id="historyFilter" title="Filter history by project"></select>
+          </div>
+        </div>
+        <div id="history" class="history"></div>
+        <p id="historyEmpty" class="muted">No generations yet.</p>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
