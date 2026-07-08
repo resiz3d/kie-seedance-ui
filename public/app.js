@@ -313,20 +313,25 @@ function makeMediaList(kind) {
     // Host any local items on kie.ai now, returning the ordered URL list.
     async resolve() {
       const ready = list.items.filter((i) => i.status === "ready");
-      return Promise.all(
-        ready.map(async (item) => {
-          if (item.remoteUrl) return item.remoteUrl;
-          if (!item.localId) throw new Error(`${item.name || kind}: missing source`);
-          const res = await fetch("/api/reupload", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: item.localId }),
-          });
-          const data = await res.json();
-          if (!res.ok || !data.hostedUrl) throw new Error(`${item.name || kind}: upload failed`);
-          return data.hostedUrl;
-        })
-      );
+      // Sequential on purpose: parallel uploads saturate the (usually much
+      // smaller) upstream link and stall everything else on the connection.
+      const urls = [];
+      for (const item of ready) {
+        if (item.remoteUrl) {
+          urls.push(item.remoteUrl);
+          continue;
+        }
+        if (!item.localId) throw new Error(`${item.name || kind}: missing source`);
+        const res = await fetch("/api/reupload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: item.localId }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.hostedUrl) throw new Error(`${item.name || kind}: upload failed`);
+        urls.push(data.hostedUrl);
+      }
+      return urls;
     },
 
     localIds() {

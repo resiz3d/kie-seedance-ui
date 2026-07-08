@@ -9,7 +9,7 @@ import "dotenv/config";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const API_BASE = "https://api.kie.ai/api/v1/jobs";
-const UPLOAD_URL = "https://kieai.redpandaai.co/api/file-base64-upload";
+const UPLOAD_URL = "https://kieai.redpandaai.co/api/file-stream-upload";
 const CREDITS_URL = "https://api.kie.ai/api/v1/chat/credit";
 const API_KEY = process.env.KIE_API_KEY;
 const PORT = process.env.PORT || 3000;
@@ -190,19 +190,18 @@ app.use(express.static(path.join(__dirname, "public")));
 app.use("/video", express.static(VIDEO_DIR)); // saved videos (per-project subfolders)
 app.use("/images", express.static(IMAGES_DIR)); // saved reference media (per-project subfolders)
 
-// Upload a data-URL / base64 string to kie.ai's file host. Returns downloadUrl.
-async function uploadToKie(base64Data, fileName) {
+// Upload raw file bytes to kie.ai's file host (multipart stream — no base64
+// inflation, ~25% less upstream bandwidth than the old base64 endpoint).
+// Returns downloadUrl.
+async function uploadToKie(buf, mime, fileName) {
+  const form = new FormData();
+  form.append("file", new Blob([buf], { type: mime }), fileName || "file");
+  form.append("uploadPath", "seedance-app/references");
+  if (fileName) form.append("fileName", fileName);
   const up = await fetch(UPLOAD_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({
-      base64Data,
-      uploadPath: "seedance-app/references",
-      fileName,
-    }),
+    headers: { Authorization: `Bearer ${API_KEY}` },
+    body: form,
   });
   const body = await up.json().catch(() => ({}));
   return { ok: up.ok, downloadUrl: body?.data?.downloadUrl, body };
@@ -422,8 +421,7 @@ app.post("/api/reupload", async (req, res) => {
 
   try {
     const buf = fs.readFileSync(path.join(IMAGES_DIR, entry.storedName));
-    const dataUrl = `data:${entry.mime};base64,${buf.toString("base64")}`;
-    const up = await uploadToKie(dataUrl, entry.name);
+    const up = await uploadToKie(buf, entry.mime, entry.name);
     if (!up.downloadUrl) throw new Error(up.body?.msg || "upload failed");
     res.json({ code: 200, msg: "ok", hostedUrl: up.downloadUrl });
   } catch (err) {
