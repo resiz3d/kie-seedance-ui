@@ -77,6 +77,58 @@ function hide(el) {
   el.classList.add("hidden");
 }
 
+// --- lightbox (full-size media overlay) --------------------------------------
+const lightbox = document.getElementById("lightbox");
+const lightboxContent = document.getElementById("lightboxContent");
+
+function openLightbox(kind, src, name) {
+  lightboxContent.innerHTML = "";
+  let el;
+  if (kind === "video") {
+    el = document.createElement("video");
+    el.src = src;
+    el.controls = true;
+    el.autoplay = true;
+  } else if (kind === "audio") {
+    el = document.createElement("audio");
+    el.src = src;
+    el.controls = true;
+  } else {
+    el = document.createElement("img");
+    el.src = src;
+    el.alt = name || "";
+  }
+  lightboxContent.appendChild(el);
+  show(lightbox);
+}
+
+function closeLightbox() {
+  hide(lightbox);
+  lightboxContent.innerHTML = ""; // drops the element so playback stops
+}
+
+lightbox.addEventListener("click", (e) => {
+  // close on backdrop or the × — but not on the media itself
+  if (e.target === lightbox || e.target.id === "lightboxClose") closeLightbox();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !lightbox.classList.contains("hidden")) closeLightbox();
+});
+
+// Small corner button that opens a thumb's media full-size.
+function makeZoomButton(kind, src, name) {
+  const zoom = document.createElement("button");
+  zoom.type = "button";
+  zoom.className = "zoom";
+  zoom.textContent = "⤢";
+  zoom.title = "View full size";
+  zoom.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openLightbox(kind, src, name);
+  });
+  return zoom;
+}
+
 // ===========================================================================
 // Media lists (images / videos / audio) — one factory drives all three.
 // Items: { uid, localId, remoteUrl, thumb, name, status }
@@ -132,6 +184,9 @@ function makeMediaList(kind) {
           list.render();
         });
         div.appendChild(x);
+
+        const zoomSrc = item.thumb || item.remoteUrl;
+        if (zoomSrc) div.appendChild(makeZoomButton(kind, zoomSrc, item.name));
 
         // drag-to-reorder within this list
         div.addEventListener("dragstart", (e) => {
@@ -595,6 +650,8 @@ function renderGallery(items) {
       }
     });
     div.appendChild(del);
+
+    div.appendChild(makeZoomButton(kind, item.localUrl, item.name));
 
     galleryEl.appendChild(div);
   }
