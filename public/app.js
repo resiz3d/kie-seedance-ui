@@ -777,6 +777,9 @@ function seedreamLabel(model) {
   return (model || "").includes("5-pro") ? "Seedream Pro" : "Seedream Lite";
 }
 
+// Only the Pro variants document the output_format parameter.
+const isSeedreamPro = () => isSeedream() && modelSelect.value.includes("5-pro");
+
 // Quality tiers resolve to different output sizes per family:
 // Lite: basic=2K, high=4K.  Pro: basic=1K, high=2K.
 const QUALITY_LABELS = {
@@ -808,6 +811,7 @@ function applyModelUI() {
   document.getElementById("imageField").classList.toggle("hidden", isT2I());
   document.getElementById("galleryWrap").classList.toggle("hidden", isT2I());
   document.getElementById("qualityField").classList.toggle("hidden", !seedream);
+  document.getElementById("formatField").classList.toggle("hidden", !isSeedreamPro());
   if (seedream) setQualityLabels();
   setAspectOptions(seedream ? IMAGE_ASPECTS : VIDEO_ASPECTS);
   for (const opt of resolutionSelect.options) {
@@ -848,6 +852,7 @@ function collectInput(resolved) {
       nsfw_checker: document.getElementById("nsfw_checker").checked,
     };
     if (isI2I()) input.image_urls = resolved.image;
+    if (isSeedreamPro()) input.output_format = document.getElementById("output_format").value;
     return input;
   }
   return {
@@ -1205,6 +1210,7 @@ async function applyEntry(entry) {
   document.getElementById("resolution").value = input.resolution || "720p";
   if (input.aspect_ratio) aspectSelect.value = input.aspect_ratio;
   qualitySelect.value = input.quality || "basic";
+  document.getElementById("output_format").value = input.output_format || "png";
   document.getElementById("duration").value = input.duration || 15;
   document.getElementById("generate_audio").checked = input.generate_audio !== false;
   document.getElementById("web_search").checked = !!input.web_search;
