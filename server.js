@@ -225,6 +225,8 @@ const ALLOWED_MODELS = new Set([
   "bytedance/seedance-2-fast",
   "seedream/5-lite-image-to-image",
   "seedream/5-lite-text-to-image",
+  "seedream/5-pro-image-to-image",
+  "seedream/5-pro-text-to-image",
 ]);
 
 app.post("/api/create", (req, res) => {

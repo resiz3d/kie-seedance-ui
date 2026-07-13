@@ -720,7 +720,7 @@ function updateEstimate() {
       )
       .map((e) => e.costCredits);
     if (!samples.length) {
-      estimateEl.textContent = `No estimate yet for Seedream Lite (${quality}) — will measure after a run.`;
+      estimateEl.textContent = `No estimate yet for ${seedreamLabel(model)} (${quality}) — will measure after a run.`;
       estimateEl.title = "";
       return;
     }
@@ -767,10 +767,29 @@ const VIDEO_ASPECTS = ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
 const IMAGE_ASPECTS = ["1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2", "21:9"];
 
 const isSeedream = () => modelSelect.value.startsWith("seedream/");
-const isI2I = () => modelSelect.value === "seedream/5-lite-image-to-image";
-const isT2I = () => modelSelect.value === "seedream/5-lite-text-to-image";
-// both seedream variants end in "-to-image"; video models never do
+const isI2I = () => isSeedream() && modelSelect.value.endsWith("-image-to-image");
+const isT2I = () => isSeedream() && modelSelect.value.endsWith("-text-to-image");
+// all seedream variants end in "-to-image"; video models never do
 const isImageOutput = (model) => (model || "").includes("-to-image");
+
+// Short display name for a seedream model id, e.g. "Seedream Pro".
+function seedreamLabel(model) {
+  return (model || "").includes("5-pro") ? "Seedream Pro" : "Seedream Lite";
+}
+
+// Quality tiers resolve to different output sizes per family:
+// Lite: basic=2K, high=4K.  Pro: basic=1K, high=2K.
+const QUALITY_LABELS = {
+  lite: { basic: "Basic (2K)", high: "High (4K)" },
+  pro: { basic: "Basic (1K)", high: "High (2K)" },
+};
+
+function setQualityLabels() {
+  const tier = modelSelect.value.includes("5-pro") ? "pro" : "lite";
+  for (const opt of qualitySelect.options) {
+    opt.textContent = QUALITY_LABELS[tier][opt.value] || opt.value;
+  }
+}
 
 function setAspectOptions(values) {
   const cur = aspectSelect.value;
@@ -789,6 +808,7 @@ function applyModelUI() {
   document.getElementById("imageField").classList.toggle("hidden", isT2I());
   document.getElementById("galleryWrap").classList.toggle("hidden", isT2I());
   document.getElementById("qualityField").classList.toggle("hidden", !seedream);
+  if (seedream) setQualityLabels();
   setAspectOptions(seedream ? IMAGE_ASPECTS : VIDEO_ASPECTS);
   for (const opt of resolutionSelect.options) {
     if (opt.value === "1080p" || opt.value === "4k") opt.disabled = fast;
@@ -1076,7 +1096,7 @@ function renderHistory(entries) {
     const proj = filter === "all" ? ` · ${projectName(entry.projectId || "default")}` : "";
     if (isImg) {
       meta.textContent =
-        `${date} · Seedream Lite · ${input.quality || "basic"} · ${input.aspect_ratio || "?"}` +
+        `${date} · ${seedreamLabel(input.model)} · ${input.quality || "basic"} · ${input.aspect_ratio || "?"}` +
         `${counts ? ` · ${counts}` : ""}${cost}${proj}`;
     } else {
       const fast = input.model === "bytedance/seedance-2-fast" ? " · Fast" : "";
