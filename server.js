@@ -549,6 +549,66 @@ app.put("/api/history/:id", (req, res) => {
   res.json({ code: 200, msg: "updated", data: entry });
 });
 
+// extension → mime for adding a generated output into the gallery
+const MIME_BY_EXT = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  mkv: "video/x-matroska",
+  webm: "video/webm",
+};
+
+// --- copy a generation's saved output into the gallery (same project) -----
+app.post("/api/history/:id/to-gallery", (req, res) => {
+  const entries = readJson(HISTORY_FILE);
+  const entry = entries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ code: 404, msg: "history entry not found" });
+  if (!entry.localVideo?.startsWith("/video/")) {
+    return res.status(400).json({ code: 400, msg: "no saved output file for this entry" });
+  }
+
+  const rel = entry.localVideo.slice("/video/".length); // <slug>/<file>
+  const src = path.join(VIDEO_DIR, rel);
+  if (!fs.existsSync(src)) {
+    return res.status(404).json({ code: 404, msg: "saved output file is missing on disk" });
+  }
+
+  const ext = (path.extname(src).slice(1) || "png").toLowerCase();
+  const mime = MIME_BY_EXT[ext] || "image/png";
+  const kind = mime.startsWith("video/") ? "video" : mime.startsWith("audio/") ? "audio" : "image";
+  const proj = resolveProject(entry.projectId);
+  const id = randomUUID();
+  const storedName = `${proj.slug}/${id}.${ext}`;
+
+  try {
+    fs.mkdirSync(path.join(IMAGES_DIR, proj.slug), { recursive: true });
+    fs.copyFileSync(src, path.join(IMAGES_DIR, storedName));
+  } catch (err) {
+    console.error("Failed to copy output into gallery:", err);
+    return res.status(500).json({ code: 500, msg: "Failed to add to gallery" });
+  }
+
+  const galleryEntry = {
+    id,
+    kind,
+    projectId: proj.id,
+    storedName,
+    name: `generated-${entry.id}.${ext}`,
+    mime,
+    localUrl: `/images/${storedName}`,
+    createdAt: new Date().toISOString(),
+  };
+  const images = readJson(IMAGES_FILE);
+  images.unshift(galleryEntry);
+  writeJson(IMAGES_FILE, images);
+
+  res.json({ code: 200, msg: "added", image: galleryEntry });
+});
+
 app.listen(PORT, () => {
   console.log(`\n  Seedance app running:  http://localhost:${PORT}\n`);
 });

@@ -1186,7 +1186,8 @@ function renderHistory(entries) {
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
     copyBtn.className = "btn-secondary";
-    copyBtn.textContent = "Copy prompt";
+    copyBtn.innerHTML = '<span class="btn-ico">⧉</span> Prompt';
+    copyBtn.title = "Copy the prompt to the clipboard";
     copyBtn.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(input.prompt || "");
@@ -1194,17 +1195,47 @@ function renderHistory(entries) {
       } catch {
         copyBtn.textContent = "Copy failed";
       }
-      setTimeout(() => (copyBtn.textContent = "Copy prompt"), 1200);
+      setTimeout(() => (copyBtn.innerHTML = '<span class="btn-ico">⧉</span> Prompt'), 1200);
     });
     actions.appendChild(copyBtn);
 
-    const link = document.createElement("a");
-    link.className = "btn-secondary";
-    link.href = entry.localVideo || entry.resultUrl;
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.textContent = isImg ? "Open image" : "Open video";
-    actions.appendChild(link);
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "btn-secondary";
+    openBtn.innerHTML = '<span class="btn-ico">⛶</span> Open';
+    openBtn.title = "Open full size";
+    openBtn.addEventListener("click", () => {
+      openLightbox(isImg ? "image" : "video", entry.localVideo || entry.resultUrl, input.prompt);
+    });
+    actions.appendChild(openBtn);
+
+    // add the generated image to the gallery for its own project
+    if (isImg) {
+      const galleryBtn = document.createElement("button");
+      galleryBtn.type = "button";
+      galleryBtn.className = "btn-secondary";
+      galleryBtn.innerHTML = '<span class="btn-ico">＋</span> Gallery';
+      galleryBtn.title = "Add this image to the gallery";
+      galleryBtn.addEventListener("click", async () => {
+        galleryBtn.disabled = true;
+        try {
+          const res = await fetch(`/api/history/${entry.id}/to-gallery`, { method: "POST" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.msg || "Failed to add to gallery");
+          galleryBtn.innerHTML = "Added!";
+          loadGallery();
+          setTimeout(() => {
+            galleryBtn.innerHTML = '<span class="btn-ico">＋</span> Gallery';
+            galleryBtn.disabled = false;
+          }, 1200);
+        } catch (err) {
+          alert(err.message || String(err));
+          galleryBtn.innerHTML = '<span class="btn-ico">＋</span> Gallery';
+          galleryBtn.disabled = false;
+        }
+      });
+      actions.appendChild(galleryBtn);
+    }
 
     // reassign the entry to another project (files stay where they are)
     const projSel = document.createElement("select");

@@ -706,6 +706,16 @@ video,
   background: var(--bg);
 }
 
+.btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btn-ico {
+  opacity: 0.85;
+  font-size: 0.85em;
+}
+
 .hist-actions .hist-project {
   font-size: 0.78rem;
   padding: 0.35rem 0.5rem;
