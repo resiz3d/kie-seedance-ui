@@ -820,10 +820,32 @@ function applyModelUI() {
   if (fast && (resolutionSelect.value === "1080p" || resolutionSelect.value === "4k")) {
     resolutionSelect.value = "720p";
   }
+  updatePromptCount(); // the cap depends on the selected model
   updateEstimate();
 }
 modelSelect.addEventListener("change", applyModelUI);
 qualitySelect.addEventListener("change", updateEstimate);
+
+// --- prompt length counter -----------------------------------------------
+// Caps per the model docs: Seedance 20,000; Seedream Lite 3,000; Pro 5,000.
+const promptEl = document.getElementById("prompt");
+const promptCount = document.getElementById("promptCount");
+const promptCapHint = document.getElementById("promptCapHint");
+
+function promptCap() {
+  if (!isSeedream()) return 20000;
+  return isSeedreamPro() ? 5000 : 3000;
+}
+
+function updatePromptCount() {
+  const cap = promptCap();
+  const len = promptEl.value.length;
+  promptCapHint.textContent = `(max ${cap.toLocaleString()} characters)`;
+  promptCount.textContent = `${len.toLocaleString()} / ${cap.toLocaleString()}`;
+  promptCount.classList.toggle("over", len > cap);
+}
+promptEl.addEventListener("input", updatePromptCount);
+updatePromptCount();
 
 // --- helpers ----------------------------------------------------------------
 function setError(msg) {
@@ -884,6 +906,12 @@ form.addEventListener("submit", async (e) => {
   }
   if (isI2I() && !lists.image.items.some((i) => i.status === "ready")) {
     setError("Seedream image-to-image needs at least one reference image.");
+    return;
+  }
+  if (promptEl.value.length > promptCap()) {
+    setError(
+      `Prompt is ${promptEl.value.length.toLocaleString()} characters — this model's limit is ${promptCap().toLocaleString()}.`
+    );
     return;
   }
 
@@ -1211,6 +1239,7 @@ async function applyEntry(entry) {
   if (input.aspect_ratio) aspectSelect.value = input.aspect_ratio;
   qualitySelect.value = input.quality || "basic";
   document.getElementById("output_format").value = input.output_format || "png";
+  updatePromptCount();
   document.getElementById("duration").value = input.duration || 15;
   document.getElementById("generate_audio").checked = input.generate_audio !== false;
   document.getElementById("web_search").checked = !!input.web_search;

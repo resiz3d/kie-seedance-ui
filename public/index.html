@@ -44,14 +44,17 @@
           </select>
         </label>
 
-        <label>
-          Prompt
+        <div class="field">
+          <div class="field-head">
+            <span>Prompt <span class="hint" id="promptCapHint"></span></span>
+            <span class="char-count" id="promptCount"></span>
+          </div>
           <textarea
             id="prompt"
             rows="4"
             placeholder="Describe the video you want to generate. Reference images with @Image1, @Image2, etc."
           ></textarea>
-        </label>
+        </div>
 
         <div class="field" id="imageField">
           <div class="field-head">

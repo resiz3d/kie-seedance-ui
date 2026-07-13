@@ -280,6 +280,17 @@ video,
   align-items: center;
 }
 
+.char-count {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.char-count.over {
+  color: var(--error);
+  font-weight: 600;
+}
+
 .link-btn {
   background: none;
   border: none;
