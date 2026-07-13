@@ -90,6 +90,12 @@ header {
 
 .credits-label {
   color: var(--muted);
+  text-decoration: none;
+}
+
+a.credits-label:hover {
+  color: var(--text);
+  text-decoration: underline;
 }
 
 .credits-value {
