@@ -822,6 +822,18 @@ function applyModelUI() {
   }
   updatePromptCount(); // the cap depends on the selected model
   updateEstimate();
+  updateModelChrome();
+}
+
+// Retitle the page and the Generate button for the selected model.
+function updateModelChrome() {
+  const label = modelSelect.options[modelSelect.selectedIndex].textContent.replace(/\s*\(.*\)$/, "").trim();
+  const image = isSeedream();
+  const medium = image ? "image" : "video";
+  document.getElementById("pageTitle").textContent = label;
+  document.getElementById("pageSub").textContent = `Generate ${medium} with the ${label} model`;
+  document.title = label;
+  submitBtn.textContent = image ? "Generate Image" : "Generate Video";
 }
 modelSelect.addEventListener("change", applyModelUI);
 qualitySelect.addEventListener("change", updateEstimate);
@@ -1309,6 +1321,7 @@ setInterval(checkServer, PING_INTERVAL_MS);
 window.addEventListener("focus", checkServer);
 
 // --- initial load ---------------------------------------------------------------
+applyModelUI(); // sync title, button, and model-dependent fields to the default
 loadProjects();
 loadCredits();
 loadGallery();
