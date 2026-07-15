@@ -1,16 +1,8 @@
 const form = document.getElementById("genForm");
 const submitBtn = document.getElementById("submitBtn");
 
-const statusEl = document.getElementById("status");
-const statusText = document.getElementById("statusText");
-const spinner = document.getElementById("spinner");
-const taskIdEl = document.getElementById("taskId");
-
-const resultEl = document.getElementById("result");
-const video = document.getElementById("video");
-const resultImage = document.getElementById("resultImage");
-const downloadLink = document.getElementById("downloadLink");
-const resultMeta = document.getElementById("resultMeta");
+// Container for per-generation job cards (many can run at once).
+const jobsEl = document.getElementById("jobs");
 
 const errorEl = document.getElementById("error");
 
@@ -41,26 +33,40 @@ let activeProjectId = localStorage.getItem(PROJECT_KEY) || "default";
 
 const POLL_INTERVAL_MS = 5000;
 
-// Persisted in-flight task so a tab reload can resume polling instead of losing it.
+// Persisted in-flight tasks so a tab reload can resume polling instead of losing
+// them. Stored as an ARRAY so multiple concurrent generations all survive reload.
 const INFLIGHT_KEY = "seedance_inflight";
 const INFLIGHT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // ignore tasks older than a day
 
-function saveInflight(obj) {
-  try {
-    localStorage.setItem(INFLIGHT_KEY, JSON.stringify(obj));
-  } catch {}
+// Fields of a job that need to persist for a reload-time resume.
+function serializeJob(job) {
+  const { jobId, taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs, startedAt } = job;
+  return { jobId, taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs, startedAt };
 }
-function clearInflight() {
+
+function loadInflightList() {
   try {
-    localStorage.removeItem(INFLIGHT_KEY);
-  } catch {}
-}
-function loadInflight() {
-  try {
-    return JSON.parse(localStorage.getItem(INFLIGHT_KEY) || "null");
+    const raw = JSON.parse(localStorage.getItem(INFLIGHT_KEY) || "null");
+    if (Array.isArray(raw)) return raw;
+    if (raw?.taskId) return [raw]; // migrate the old single-object format
+    return [];
   } catch {
-    return null;
+    return [];
   }
+}
+function saveInflightList(list) {
+  try {
+    if (list.length) localStorage.setItem(INFLIGHT_KEY, JSON.stringify(list));
+    else localStorage.removeItem(INFLIGHT_KEY);
+  } catch {}
+}
+function addInflight(job) {
+  const list = loadInflightList().filter((j) => j.taskId !== job.taskId);
+  list.push(serializeJob(job));
+  saveInflightList(list);
+}
+function removeInflight(taskId) {
+  saveInflightList(loadInflightList().filter((j) => j.taskId !== taskId));
 }
 
 // Seed credit rates (credits/sec) measured from real runs; refined from history.
@@ -860,20 +866,97 @@ promptEl.addEventListener("input", updatePromptCount);
 updatePromptCount();
 
 // --- helpers ----------------------------------------------------------------
+// Form-level error (validation / pre-submit failures). Per-job errors live on
+// the job card instead — see JobCard.fail().
 function setError(msg) {
   errorEl.textContent = msg;
   show(errorEl);
-  hide(spinner);
 }
 
-function resetUi() {
-  hide(errorEl);
-  hide(resultEl);
-  hide(statusEl);
-  video.removeAttribute("src");
-  resultImage.removeAttribute("src");
-  hide(resultImage);
-  resultMeta.textContent = "";
+// --- job cards ---------------------------------------------------------------
+// Each generation gets its own card so many can run at once. A card walks
+// through: submitting → generating → (success shows the result | fail shows the
+// error). Terminal cards get a dismiss × and stay until the user clears them.
+let nextJobId = 1;
+
+function createJobCard(job) {
+  const card = document.createElement("div");
+  card.className = "job-card";
+  card.dataset.status = "running";
+
+  const main = document.createElement("div");
+  main.className = "job-main";
+
+  const line = document.createElement("div");
+  line.className = "status-line";
+  const spin = document.createElement("span");
+  spin.className = "spinner";
+  const statusText = document.createElement("span");
+  statusText.className = "job-status";
+  statusText.textContent = "Submitting…";
+  line.append(spin, statusText);
+
+  const taskIdEl = document.createElement("div");
+  taskIdEl.className = "task-id";
+  main.append(line, taskIdEl);
+
+  const result = document.createElement("div");
+  result.className = "job-result hidden";
+
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "job-dismiss hidden";
+  dismiss.textContent = "×";
+  dismiss.title = "Dismiss";
+  dismiss.addEventListener("click", () => {
+    card.remove();
+    if (!jobsEl.children.length) hide(jobsEl);
+  });
+
+  card.append(dismiss, main, result);
+  jobsEl.prepend(card); // newest on top
+  show(jobsEl);
+
+  const api = {
+    el: card,
+    setStatus(text) {
+      statusText.textContent = text;
+    },
+    setTaskId(taskId) {
+      taskIdEl.textContent = `Task ID: ${taskId}`;
+    },
+    showResult(isImage, url, costText) {
+      card.dataset.status = "done";
+      line.remove();
+      const media = document.createElement(isImage ? "img" : "video");
+      media.src = url;
+      if (!isImage) media.controls = true;
+      if (isImage) media.alt = "Generated image";
+      const meta = document.createElement("p");
+      meta.className = "hist-meta";
+      meta.textContent = costText || "";
+      const link = document.createElement("a");
+      link.className = "job-download";
+      link.href = url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "Open result in new tab";
+      result.append(media, meta, link);
+      show(result);
+      dismiss.classList.remove("hidden");
+    },
+    fail(msg) {
+      card.dataset.status = "failed";
+      line.remove();
+      const err = document.createElement("pre");
+      err.className = "job-error";
+      err.textContent = msg;
+      result.append(err);
+      show(result);
+      dismiss.classList.remove("hidden");
+    },
+  };
+  return api;
 }
 
 function collectInput(resolved) {
@@ -927,12 +1010,11 @@ form.addEventListener("submit", async (e) => {
     return;
   }
 
-  resetUi();
+  hide(errorEl);
+  // Lock only for the upload→create window so a double-click can't double-submit
+  // the same form. It re-enables once the task is created, freeing you to queue
+  // another generation while this one keeps polling in the background.
   submitBtn.disabled = true;
-
-  show(statusEl);
-  show(spinner);
-  taskIdEl.textContent = "";
 
   const mediaLocalIds = {
     image: isT2I() ? [] : lists.image.localIds(),
@@ -940,11 +1022,23 @@ form.addEventListener("submit", async (e) => {
     audio: isSeedream() ? [] : lists.audio.localIds(),
   };
 
+  const job = {
+    jobId: nextJobId++,
+    taskId: null,
+    input: null,
+    mediaLocalIds,
+    balanceBefore: null,
+    projectId: activeProjectId, // pin now so a mid-run project switch can't misfile it
+    refSecs: isSeedream() ? 0 : refVideoSeconds(),
+    startedAt: Date.now(),
+  };
+  const card = createJobCard(job);
+
   // Host reference media on kie.ai now — nothing was sent when they were dropped.
   let resolved;
   try {
     if (allItems().some((i) => i.status === "ready")) {
-      statusText.textContent = "Uploading reference media…";
+      card.setStatus("Uploading reference media…");
     }
     resolved = {
       // only upload the reference kinds the selected model actually uses
@@ -953,79 +1047,82 @@ form.addEventListener("submit", async (e) => {
       audio: isSeedream() ? [] : await lists.audio.resolve(),
     };
   } catch (err) {
-    setError(err.message || "Failed to upload reference media.");
+    card.fail(err.message || "Failed to upload reference media.");
     submitBtn.disabled = false;
     return;
   }
 
-  const input = collectInput(resolved);
+  job.input = collectInput(resolved);
+  card.setStatus("Submitting…");
 
-  statusText.textContent = "Submitting…";
-
-  // Snapshot the balance so we can measure actual cost on completion.
-  const balanceBefore = await loadCredits();
+  // Snapshot the balance so we can measure actual cost on completion. (With
+  // overlapping runs this delta is unreliable; the per-task creditsConsumed
+  // reported on completion is the primary source and stays accurate.)
+  job.balanceBefore = await loadCredits();
 
   try {
+    job.taskId = await createTask(job.input, card);
+    card.setTaskId(job.taskId);
+    card.setStatus("Generating… this can take a few minutes.");
+    addInflight(job);
+    pollJob(job, card);
+  } catch (err) {
+    card.fail(err.message || String(err));
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// POST /api/create, retrying on HTTP 429 — kie.ai's one hard limit is 20 new
+// requests / 10s, and rejected requests are NOT queued, so we back off and retry.
+const RATE_LIMIT_RETRIES = 5;
+const RATE_LIMIT_BACKOFF_MS = 6000;
+async function createTask(input, card) {
+  for (let attempt = 0; ; attempt++) {
     const res = await fetch("/api/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
 
+    if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
+      card.setStatus(`Rate-limited — retrying (${attempt + 1}/${RATE_LIMIT_RETRIES})…`);
+      await sleep(RATE_LIMIT_BACKOFF_MS);
+      continue;
+    }
     if (!res.ok || data.code !== 200 || !data.data?.taskId) {
       throw new Error(data.msg || `Request failed (${res.status})`);
     }
-
-    const taskId = data.data.taskId;
-    taskIdEl.textContent = `Task ID: ${taskId}`;
-    statusText.textContent = "Generating… this can take a few minutes.";
-    // pin the project at submit time so a mid-run project switch doesn't misfile the result
-    const projectId = activeProjectId;
-    const refSecs = isSeedream() ? 0 : refVideoSeconds();
-    saveInflight({ taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs, startedAt: Date.now() });
-    pollStatus(taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs);
-  } catch (err) {
-    setError(err.message || String(err));
-    submitBtn.disabled = false;
+    return data.data.taskId;
   }
-});
+}
 
-async function pollStatus(taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs) {
+async function pollJob(job, card) {
+  const { taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs } = job;
   try {
     const res = await fetch(`/api/status?taskId=${encodeURIComponent(taskId)}`);
     const data = await res.json();
 
     if (!res.ok || data.code !== 200) {
-      // 4xx means the task is gone/invalid — terminal, don't keep resuming it.
-      if (res.status >= 400 && res.status < 500) clearInflight();
+      // 4xx means the task is gone/invalid — terminal, stop tracking it.
+      if (res.status >= 400 && res.status < 500) removeInflight(taskId);
       throw new Error(data.msg || `Status check failed (${res.status})`);
     }
 
     const state = data.data?.state;
 
     if (state === "success") {
-      clearInflight();
+      removeInflight(taskId);
       const parsed = JSON.parse(data.data.resultJson || "{}");
       const url = parsed.resultUrls?.[0];
       if (!url) throw new Error("Task succeeded but no result URL was returned.");
 
-      hide(statusEl);
-      if (isImageOutput(input?.model)) {
-        resultImage.src = url;
-        show(resultImage);
-        hide(video);
-      } else {
-        video.src = url;
-        show(video);
-        hide(resultImage);
-      }
-      downloadLink.href = url;
-      show(resultEl);
-      submitBtn.disabled = false;
-
       // Prefer the API's exact per-task cost (creditsConsumed on recordInfo);
-      // fall back to the balance delta for older responses.
+      // fall back to the balance delta for older responses (unreliable when
+      // runs overlap — see the submit-time note).
       const balanceAfter = await loadCredits(); // also refreshes the header balance
       let cost = null;
       const reported = Number(data.data.creditsConsumed);
@@ -1035,23 +1132,28 @@ async function pollStatus(taskId, input, mediaLocalIds, balanceBefore, projectId
         const delta = balanceBefore - balanceAfter;
         if (delta > 0) cost = delta;
       }
-      resultMeta.textContent = cost != null ? `Used ~${cost.toLocaleString()} credits` : "";
 
+      card.showResult(
+        isImageOutput(input?.model),
+        url,
+        cost != null ? `Used ~${cost.toLocaleString()} credits` : ""
+      );
       saveToHistory(input, taskId, url, cost, mediaLocalIds, projectId, refSecs);
       return;
     }
 
     if (state === "fail") {
-      clearInflight();
+      removeInflight(taskId);
       throw new Error(
         data.data?.failMsg || `Generation failed (code ${data.data?.failCode ?? "?"}).`
       );
     }
 
-    setTimeout(() => pollStatus(taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs), POLL_INTERVAL_MS);
+    setTimeout(() => pollJob(job, card), POLL_INTERVAL_MS);
   } catch (err) {
-    setError(err.message || String(err));
-    submitBtn.disabled = false;
+    // Transient status-check errors keep the inflight record (a reload can
+    // resume it); terminal states already removed it above.
+    card.fail(err.message || String(err));
   }
 }
 
@@ -1315,23 +1417,30 @@ async function applyEntry(entry) {
   updateEstimate();
 }
 
-// Resume a generation that was in flight when the tab was closed/reloaded.
+// Resume every generation that was in flight when the tab was closed/reloaded.
 function resumeInflight() {
-  const pending = loadInflight();
-  if (!pending?.taskId) return;
-  if (pending.startedAt && Date.now() - pending.startedAt > INFLIGHT_MAX_AGE_MS) {
-    clearInflight();
-    return;
+  const fresh = loadInflightList().filter(
+    (p) => p?.taskId && !(p.startedAt && Date.now() - p.startedAt > INFLIGHT_MAX_AGE_MS)
+  );
+  saveInflightList(fresh); // prune stale/aged-out entries
+
+  for (const pending of fresh) {
+    const job = {
+      jobId: nextJobId++,
+      taskId: pending.taskId,
+      input: pending.input,
+      // older saved state used imageLocalIds (a plain array)
+      mediaLocalIds: pending.mediaLocalIds || { image: pending.imageLocalIds || [] },
+      balanceBefore: pending.balanceBefore,
+      projectId: pending.projectId || activeProjectId,
+      refSecs: pending.refSecs || 0,
+      startedAt: pending.startedAt,
+    };
+    const card = createJobCard(job);
+    card.setTaskId(job.taskId);
+    card.setStatus("Resuming previous generation… this can take a few minutes.");
+    pollJob(job, card);
   }
-  resetUi();
-  submitBtn.disabled = true;
-  show(statusEl);
-  show(spinner);
-  statusText.textContent = "Resuming previous generation… this can take a few minutes.";
-  taskIdEl.textContent = `Task ID: ${pending.taskId}`;
-  // older saved state used imageLocalIds (a plain array)
-  const mediaLocalIds = pending.mediaLocalIds || { image: pending.imageLocalIds || [] };
-  pollStatus(pending.taskId, pending.input, mediaLocalIds, pending.balanceBefore, pending.projectId || activeProjectId, pending.refSecs || 0);
 }
 
 // --- server-down banner ----------------------------------------------------------

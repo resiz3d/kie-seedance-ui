@@ -161,20 +161,8 @@
         </div>
       </form>
 
-      <section id="status" class="hidden">
-        <div class="status-line">
-          <span class="spinner" id="spinner"></span>
-          <span id="statusText">Submitting…</span>
-        </div>
-        <div id="taskId" class="task-id"></div>
-      </section>
-
-      <section id="result" class="hidden">
-        <video id="video" controls></video>
-        <img id="resultImage" class="hidden" alt="Generated image" />
-        <p id="resultMeta" class="hist-meta"></p>
-        <a id="downloadLink" href="#" target="_blank" rel="noopener">Open result in new tab</a>
-      </section>
+      <!-- One card per in-flight/finished generation; multiple run concurrently. -->
+      <section id="jobs" class="jobs hidden"></section>
 
       <pre id="error" class="hidden"></pre>
 
