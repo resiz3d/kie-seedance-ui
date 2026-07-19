@@ -223,6 +223,7 @@ async function forward(res, upstreamPromise) {
 const ALLOWED_MODELS = new Set([
   "bytedance/seedance-2",
   "bytedance/seedance-2-fast",
+  "bytedance/seedance-2-mini",
   "seedream/5-lite-image-to-image",
   "seedream/5-lite-text-to-image",
   "seedream/5-pro-image-to-image",

@@ -741,7 +741,8 @@ function updateEstimate() {
   const audioOn = document.getElementById("generate_audio").checked;
   const r = ratePerSec(model, resolution, audioOn);
   if (!r || !duration) {
-    const label = model === "bytedance/seedance-2-fast" ? `Seedance 2 Fast at ${resolution}` : resolution;
+    const variant = VIDEO_VARIANT_LABEL[model];
+    const label = variant ? `Seedance 2 ${variant} at ${resolution}` : resolution;
     estimateEl.textContent = `No estimate yet for ${label} — will measure after a run.`;
     estimateEl.title = "";
     return;
@@ -761,9 +762,9 @@ function updateEstimate() {
 );
 document.getElementById("generate_audio").addEventListener("change", updateEstimate);
 
-// Per-model form shaping: Seedance 2 Fast caps resolution at 720p; Seedream
-// 5.0 Lite is image-to-image (no duration/resolution/audio/video, has quality,
-// different aspect ratios).
+// Per-model form shaping: Seedance 2 Fast and Mini cap resolution at 720p;
+// Seedream 5.0 Lite is image-to-image (no duration/resolution/audio/video, has
+// quality, different aspect ratios).
 const modelSelect = document.getElementById("model");
 const resolutionSelect = document.getElementById("resolution");
 const qualitySelect = document.getElementById("quality");
@@ -777,6 +778,16 @@ const isI2I = () => isSeedream() && modelSelect.value.endsWith("-image-to-image"
 const isT2I = () => isSeedream() && modelSelect.value.endsWith("-text-to-image");
 // all seedream variants end in "-to-image"; video models never do
 const isImageOutput = (model) => (model || "").includes("-to-image");
+
+// Video variants that top out at 720p (the standard model reaches 1080p/4k).
+const CAPPED_720_MODELS = new Set(["bytedance/seedance-2-fast", "bytedance/seedance-2-mini"]);
+const isCapped720 = () => CAPPED_720_MODELS.has(modelSelect.value);
+
+// Short suffix distinguishing the non-standard video variants in labels.
+const VIDEO_VARIANT_LABEL = {
+  "bytedance/seedance-2-fast": "Fast",
+  "bytedance/seedance-2-mini": "Mini",
+};
 
 // Short display name for a seedream model id, e.g. "Seedream Pro".
 function seedreamLabel(model) {
@@ -809,7 +820,7 @@ function setAspectOptions(values) {
 
 function applyModelUI() {
   const seedream = isSeedream();
-  const fast = modelSelect.value === "bytedance/seedance-2-fast";
+  const capped = isCapped720();
   for (const id of ["videoField", "audioField", "resolutionField", "durationField", "genAudioField", "webSearchField"]) {
     document.getElementById(id).classList.toggle("hidden", seedream);
   }
@@ -821,9 +832,9 @@ function applyModelUI() {
   if (seedream) setQualityLabels();
   setAspectOptions(seedream ? IMAGE_ASPECTS : VIDEO_ASPECTS);
   for (const opt of resolutionSelect.options) {
-    if (opt.value === "1080p" || opt.value === "4k") opt.disabled = fast;
+    if (opt.value === "1080p" || opt.value === "4k") opt.disabled = capped;
   }
-  if (fast && (resolutionSelect.value === "1080p" || resolutionSelect.value === "4k")) {
+  if (capped && (resolutionSelect.value === "1080p" || resolutionSelect.value === "4k")) {
     resolutionSelect.value = "720p";
   }
   updatePromptCount(); // the cap depends on the selected model
@@ -1246,9 +1257,9 @@ function renderHistory(entries) {
         `${date} · ${seedreamLabel(input.model)} · ${input.quality || "basic"} · ${input.aspect_ratio || "?"}` +
         `${counts ? ` · ${counts}` : ""}${cost}${proj}`;
     } else {
-      const fast = input.model === "bytedance/seedance-2-fast" ? " · Fast" : "";
+      const variant = VIDEO_VARIANT_LABEL[input.model] ? ` · ${VIDEO_VARIANT_LABEL[input.model]}` : "";
       meta.textContent =
-        `${date}${fast} · ${input.resolution || "?"} · ${input.aspect_ratio || "?"} · ` +
+        `${date}${variant} · ${input.resolution || "?"} · ${input.aspect_ratio || "?"} · ` +
         `${input.duration || "?"}s${counts ? ` · ${counts}` : ""}${cost}${proj}`;
     }
     body.appendChild(meta);
