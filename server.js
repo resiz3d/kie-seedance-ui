@@ -2,8 +2,9 @@ import express from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
+import os from "node:os";
 import "dotenv/config";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,9 +14,20 @@ const UPLOAD_URL = "https://kieai.redpandaai.co/api/file-stream-upload";
 const CREDITS_URL = "https://api.kie.ai/api/v1/chat/credit";
 const API_KEY = process.env.KIE_API_KEY;
 const PORT = process.env.PORT || 3000;
+// Network interface to bind. Default 127.0.0.1 = this PC only. Set HOST=0.0.0.0
+// in .env to also accept connections from other devices on your home network
+// (see the security warning printed at startup).
+const HOST = process.env.HOST || "127.0.0.1";
+// Optional password gate. When APP_PASSWORD is set in .env, every page/route
+// (UI, API, and saved media) requires signing in first; unset = no auth.
+const APP_PASSWORD = process.env.APP_PASSWORD || "";
+const AUTH_ENABLED = APP_PASSWORD.length > 0;
 
-const VIDEO_DIR = path.join(__dirname, "video");
-const IMAGES_DIR = path.join(__dirname, "images");
+// Media output folders — override via .env (VIDEO_DIR / IMAGES_DIR) to store
+// elsewhere. A relative value resolves against the app root; an absolute path is
+// used as-is. Per-project subfolders are still created inside these.
+const VIDEO_DIR = path.resolve(__dirname, process.env.VIDEO_DIR || "video");
+const IMAGES_DIR = path.resolve(__dirname, process.env.IMAGES_DIR || "images");
 const HISTORY_FILE = path.join(__dirname, "history.json");
 const IMAGES_FILE = path.join(__dirname, "images.json");
 const PROJECTS_FILE = path.join(__dirname, "projects.json");
@@ -186,6 +198,107 @@ reconcileGalleryLocations();
 
 const app = express();
 app.use(express.json({ limit: "120mb" })); // base64 video can approach ~67MB for a 50MB file
+
+// --- optional password gate (active only when APP_PASSWORD is set) ----------
+const AUTH_COOKIE = "seedance_auth";
+// A stable, non-reversible token derived from the password: what we store in the
+// cookie and re-check on every request (survives restarts, reveals no plaintext).
+const AUTH_TOKEN = AUTH_ENABLED
+  ? createHash("sha256").update(`seedance-auth:${APP_PASSWORD}`).digest("hex")
+  : "";
+
+function tokenFor(password) {
+  return createHash("sha256").update(`seedance-auth:${password}`).digest("hex");
+}
+function tokenValid(token) {
+  if (!token || token.length !== AUTH_TOKEN.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(token), Buffer.from(AUTH_TOKEN));
+  } catch {
+    return false;
+  }
+}
+function readCookie(req, name) {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
+
+// Minimal dark-themed sign-in page (self-contained — served before static, so it
+// can't rely on /style.css).
+function loginPage(error = false) {
+  return `<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Seedance — Sign in</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0f1115;color:#e6e8ec;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  form{background:#181b22;border:1px solid #2a2f3a;border-radius:12px;padding:1.75rem;width:min(340px,90vw);
+    display:flex;flex-direction:column;gap:0.85rem}
+  h1{margin:0;font-size:1.15rem}
+  p{margin:0;color:#8a92a3;font-size:0.85rem}
+  input{background:#0f1115;border:1px solid #2a2f3a;border-radius:8px;color:#e6e8ec;
+    padding:0.6rem 0.7rem;font-size:1rem}
+  button{background:#6c8cff;border:none;border-radius:8px;color:#fff;padding:0.6rem;
+    font-size:1rem;font-weight:600;cursor:pointer}
+  button:hover{background:#5577ff}
+  .err{color:#ff6b6b;font-size:0.85rem;${error ? "" : "display:none"}}
+</style></head><body>
+<form id="f">
+  <h1>Seedance</h1>
+  <p>Enter the password to continue.</p>
+  <input id="pw" type="password" autocomplete="current-password" autofocus placeholder="Password" />
+  <div class="err" id="err">Incorrect password.</div>
+  <button type="submit">Sign in</button>
+</form>
+<script>
+  const f=document.getElementById("f"),err=document.getElementById("err");
+  f.addEventListener("submit",async(e)=>{
+    e.preventDefault();err.style.display="none";
+    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({password:document.getElementById("pw").value})});
+    if(r.ok){location.reload();}else{err.style.display="block";document.getElementById("pw").select();}
+  });
+</script></body></html>`;
+}
+
+if (AUTH_ENABLED) {
+  // Reachable while signed out so a user can authenticate.
+  app.post("/api/login", (req, res) => {
+    const password = String(req.body?.password ?? "");
+    if (tokenValid(tokenFor(password))) {
+      res.cookie(AUTH_COOKIE, AUTH_TOKEN, {
+        httpOnly: true,
+        sameSite: "lax",
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+        path: "/",
+      });
+      return res.json({ code: 200, msg: "ok" });
+    }
+    res.status(401).json({ code: 401, msg: "Incorrect password" });
+  });
+  app.post("/api/logout", (req, res) => {
+    res.clearCookie(AUTH_COOKIE, { path: "/" });
+    res.json({ code: 200, msg: "ok" });
+  });
+
+  // Gate everything else: valid cookie → continue; browser navigation → login
+  // page; any other request → 401.
+  app.use((req, res, next) => {
+    if (tokenValid(readCookie(req, AUTH_COOKIE))) return next();
+    if (req.method === "GET" && (req.headers.accept || "").includes("text/html")) {
+      return res.status(200).type("html").send(loginPage());
+    }
+    res.status(401).json({ code: 401, msg: "Authentication required" });
+  });
+}
+
 app.use(express.static(path.join(__dirname, "public")));
 app.use("/video", express.static(VIDEO_DIR)); // saved videos (per-project subfolders)
 app.use("/images", express.static(IMAGES_DIR)); // saved reference media (per-project subfolders)
@@ -610,6 +723,43 @@ app.post("/api/history/:id/to-gallery", (req, res) => {
   res.json({ code: 200, msg: "added", image: galleryEntry });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  Seedance app running:  http://localhost:${PORT}\n`);
+// IPv4 addresses of this machine on the local network (for the startup hint).
+function lanUrls(port) {
+  const urls = [];
+  for (const ifaces of Object.values(os.networkInterfaces())) {
+    for (const i of ifaces || []) {
+      if (i.family === "IPv4" && !i.internal) urls.push(`http://${i.address}:${port}`);
+    }
+  }
+  return urls;
+}
+
+app.listen(PORT, HOST, () => {
+  const loopback = HOST === "127.0.0.1" || HOST === "localhost" || HOST === "::1";
+  console.log(`\n  Seedance app running:  http://localhost:${PORT}`);
+  console.log(`  Password protection:   ${AUTH_ENABLED ? "ON" : "OFF (set APP_PASSWORD in .env to enable)"}`);
+
+  if (!loopback) {
+    const urls = lanUrls(PORT);
+    if (urls.length) {
+      console.log("\n  On your home network (other devices on the same Wi-Fi/LAN):");
+      for (const u of urls) console.log(`    ${u}`);
+    }
+    const noLogin =
+      "\n  ⚠ LAN access is ON (HOST=" +
+      HOST +
+      "). There is no login: anyone on your network who\n" +
+      "    opens this URL can use the app and spend your kie.ai credits. Consider\n" +
+      "    setting APP_PASSWORD in .env. Only enable LAN access on a network you trust,\n" +
+      "    and never port-forward it to the internet.\n" +
+      "    (Windows may also prompt to allow Node through the firewall the first time.)";
+    const withLogin =
+      "\n  ⚠ LAN access is ON (HOST=" +
+      HOST +
+      "). The app is password-protected, but still: only enable\n" +
+      "    LAN access on a network you trust, and never port-forward it to the internet.\n" +
+      "    (Windows may also prompt to allow Node through the firewall the first time.)";
+    console.log(AUTH_ENABLED ? withLogin : noLogin);
+  }
+  console.log("");
 });

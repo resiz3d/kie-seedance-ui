@@ -163,6 +163,9 @@
       </form>
 
       <!-- One card per in-flight/finished generation; multiple run concurrently. -->
+      <div id="jobsHeader" class="jobs-header hidden">
+        <button type="button" id="closeAllJobs" class="btn-secondary">Close All</button>
+      </div>
       <section id="jobs" class="jobs hidden"></section>
 
       <pre id="error" class="hidden"></pre>
@@ -190,7 +193,9 @@
 
     <div id="lightbox" class="lightbox hidden">
       <button type="button" id="lightboxClose" class="lightbox-close" title="Close (Esc)">×</button>
+      <button type="button" id="lightboxPrev" class="lightbox-nav lightbox-prev hidden" title="Previous (←)">‹</button>
       <div id="lightboxContent" class="lightbox-content"></div>
+      <button type="button" id="lightboxNext" class="lightbox-nav lightbox-next hidden" title="Next (→)">›</button>
     </div>
 
     <script src="app.js"></script>

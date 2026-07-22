@@ -247,6 +247,12 @@ video,
 }
 
 /* --- job cards (one per concurrent generation) --- */
+.jobs-header {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.6rem;
+}
+
 .jobs {
   display: flex;
   flex-direction: column;
@@ -271,20 +277,33 @@ video,
   align-items: flex-start;
 }
 
+img.zoomable {
+  cursor: zoom-in;
+}
+
 .job-dismiss {
   position: absolute;
-  top: 0.4rem;
+  top: 0.5rem;
   right: 0.5rem;
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  font-size: 1.2rem;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  background: rgba(15, 17, 21, 0.65);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text);
+  font-size: 1.8rem;
   line-height: 1;
   cursor: pointer;
-  padding: 0.15rem 0.35rem;
+  padding: 0;
 }
 .job-dismiss:hover {
-  color: var(--text);
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
 }
 
 .job-download {
@@ -416,7 +435,7 @@ video,
 .thumb video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain; /* show the whole image; letterbox against .thumb bg */
   border-radius: 0;
   border: none;
   pointer-events: none; /* clicks/drags land on the .thumb container */
@@ -846,6 +865,33 @@ video,
 
 .lightbox-close:hover {
   background: var(--error);
+}
+
+.lightbox-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 64px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.12);
+  color: white;
+  font-size: 34px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 101;
+}
+
+.lightbox-nav:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.lightbox-prev {
+  left: 16px;
+}
+.lightbox-next {
+  right: 16px;
 }
 
 /* --- footer disclaimer --- */

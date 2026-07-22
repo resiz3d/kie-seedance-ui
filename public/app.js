@@ -3,6 +3,8 @@ const submitBtn = document.getElementById("submitBtn");
 
 // Container for per-generation job cards (many can run at once).
 const jobsEl = document.getElementById("jobs");
+const jobsHeader = document.getElementById("jobsHeader");
+const closeAllJobsBtn = document.getElementById("closeAllJobs");
 
 const errorEl = document.getElementById("error");
 
@@ -86,8 +88,14 @@ function hide(el) {
 // --- lightbox (full-size media overlay) --------------------------------------
 const lightbox = document.getElementById("lightbox");
 const lightboxContent = document.getElementById("lightboxContent");
+const lightboxPrev = document.getElementById("lightboxPrev");
+const lightboxNext = document.getElementById("lightboxNext");
 
-function openLightbox(kind, src, name) {
+// When opened from History, holds the list being browsed + current position, so
+// the ‹ › arrows (and ←/→ keys) can step through it. Null for single-item opens.
+let lightboxNav = null;
+
+function renderLightboxMedia(kind, src, name) {
   lightboxContent.innerHTML = "";
   let el;
   if (kind === "video") {
@@ -105,20 +113,56 @@ function openLightbox(kind, src, name) {
     el.alt = name || "";
   }
   lightboxContent.appendChild(el);
+}
+
+function openLightbox(kind, src, name, nav = null) {
+  lightboxNav = nav?.items?.length ? nav : null;
+  renderLightboxMedia(kind, src, name);
+  updateLightboxNav();
   show(lightbox);
+}
+
+// Show the arrows only while browsing a list, and hide each at its end.
+function updateLightboxNav() {
+  const active = !!lightboxNav;
+  lightboxPrev.classList.toggle("hidden", !active || lightboxNav.index <= 0);
+  lightboxNext.classList.toggle("hidden", !active || lightboxNav.index >= lightboxNav.items.length - 1);
+}
+
+function stepLightbox(delta) {
+  if (!lightboxNav) return;
+  const i = lightboxNav.index + delta;
+  if (i < 0 || i >= lightboxNav.items.length) return;
+  lightboxNav.index = i;
+  const m = historyItemMedia(lightboxNav.items[i]);
+  renderLightboxMedia(m.kind, m.src, m.name);
+  updateLightboxNav();
 }
 
 function closeLightbox() {
   hide(lightbox);
   lightboxContent.innerHTML = ""; // drops the element so playback stops
+  lightboxNav = null;
+  updateLightboxNav();
 }
 
 lightbox.addEventListener("click", (e) => {
   // close on backdrop or the × — but not on the media itself
   if (e.target === lightbox || e.target.id === "lightboxClose") closeLightbox();
 });
+lightboxPrev.addEventListener("click", (e) => {
+  e.stopPropagation();
+  stepLightbox(-1);
+});
+lightboxNext.addEventListener("click", (e) => {
+  e.stopPropagation();
+  stepLightbox(1);
+});
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !lightbox.classList.contains("hidden")) closeLightbox();
+  if (lightbox.classList.contains("hidden")) return;
+  if (e.key === "Escape") closeLightbox();
+  else if (e.key === "ArrowLeft") stepLightbox(-1);
+  else if (e.key === "ArrowRight") stepLightbox(1);
 });
 
 // Small corner button that opens a thumb's media full-size.
@@ -890,6 +934,24 @@ function setError(msg) {
 // error). Terminal cards get a dismiss × and stay until the user clears them.
 let nextJobId = 1;
 
+// Finished/failed cards — the ones safe to dismiss ("running" ones are still
+// working and have no × yet, so Close All leaves them alone).
+function terminalCards() {
+  return [...jobsEl.querySelectorAll(".job-card")].filter((c) => c.dataset.status !== "running");
+}
+
+// Keep the container + Close All header in sync with the cards on screen.
+function updateJobsChrome() {
+  jobsEl.classList.toggle("hidden", jobsEl.children.length === 0);
+  // Only worth a bulk control once there's more than one preview to clear.
+  jobsHeader.classList.toggle("hidden", terminalCards().length < 2);
+}
+
+closeAllJobsBtn.addEventListener("click", () => {
+  for (const card of terminalCards()) card.remove();
+  updateJobsChrome();
+});
+
 function createJobCard(job) {
   const card = document.createElement("div");
   card.className = "job-card";
@@ -921,12 +983,12 @@ function createJobCard(job) {
   dismiss.title = "Dismiss";
   dismiss.addEventListener("click", () => {
     card.remove();
-    if (!jobsEl.children.length) hide(jobsEl);
+    updateJobsChrome();
   });
 
   card.append(dismiss, main, result);
   jobsEl.prepend(card); // newest on top
-  show(jobsEl);
+  updateJobsChrome();
 
   const api = {
     el: card,
@@ -942,7 +1004,11 @@ function createJobCard(job) {
       const media = document.createElement(isImage ? "img" : "video");
       media.src = url;
       if (!isImage) media.controls = true;
-      if (isImage) media.alt = "Generated image";
+      if (isImage) {
+        media.alt = "Generated image";
+        media.classList.add("zoomable"); // click to open full-size
+        media.addEventListener("click", () => openLightbox("image", url, "Generated image"));
+      }
       const meta = document.createElement("p");
       meta.className = "hist-meta";
       meta.textContent = costText || "";
@@ -955,6 +1021,7 @@ function createJobCard(job) {
       result.append(media, meta, link);
       show(result);
       dismiss.classList.remove("hidden");
+      updateJobsChrome();
     },
     fail(msg) {
       card.dataset.status = "failed";
@@ -965,6 +1032,7 @@ function createJobCard(job) {
       result.append(err);
       show(result);
       dismiss.classList.remove("hidden");
+      updateJobsChrome();
     },
   };
   return api;
@@ -1203,11 +1271,35 @@ async function loadHistory() {
   }
 }
 
+// The history entries the current filter keeps, in display order — shared by
+// the rendered list and the lightbox's ‹ › navigation so they stay in sync.
+function filterHistory(entries) {
+  const filter = historyFilter.value || "all";
+  return filter === "all" ? entries : entries.filter((e) => (e.projectId || "default") === filter);
+}
+
+// kind/src/name for opening a history entry in the lightbox.
+function historyItemMedia(entry) {
+  const input = entry.input || {};
+  return {
+    kind: isImageOutput(input.model) ? "image" : "video",
+    src: entry.localVideo || entry.resultUrl, // localVideo is the saved output file
+    name: input.prompt,
+  };
+}
+
+// Open a history entry full-size, with arrow navigation across the visible list.
+function openHistoryLightbox(entry) {
+  const items = filterHistory(historyEntries);
+  const index = items.findIndex((e) => e.id === entry.id);
+  const m = historyItemMedia(entry);
+  openLightbox(m.kind, m.src, m.name, index >= 0 ? { items, index } : null);
+}
+
 function renderHistory(entries) {
   historyEl.innerHTML = "";
-  const filter = historyFilter.value || "all";
-  const visible =
-    filter === "all" ? entries : entries.filter((e) => (e.projectId || "default") === filter);
+  const filter = historyFilter.value || "all"; // used below for the per-entry project label
+  const visible = filterHistory(entries);
   historyEmpty.classList.toggle("hidden", visible.length > 0);
 
   for (const entry of visible) {
@@ -1219,8 +1311,9 @@ function renderHistory(entries) {
     if (isImg) {
       const im = document.createElement("img");
       im.src = entry.localVideo || entry.resultUrl; // localVideo holds the saved output file
-      im.className = "hist-img";
+      im.className = "hist-img zoomable";
       im.loading = "lazy";
+      im.addEventListener("click", () => openHistoryLightbox(entry)); // full-size, with ‹ › nav
       card.appendChild(im);
     } else {
       const vid = document.createElement("video");
@@ -1317,9 +1410,7 @@ function renderHistory(entries) {
     openBtn.className = "btn-secondary";
     openBtn.innerHTML = '<span class="btn-ico">⛶</span> Open';
     openBtn.title = "Open full size";
-    openBtn.addEventListener("click", () => {
-      openLightbox(isImg ? "image" : "video", entry.localVideo || entry.resultUrl, input.prompt);
-    });
+    openBtn.addEventListener("click", () => openHistoryLightbox(entry));
     actions.appendChild(openBtn);
 
     // add the generated image to the gallery for its own project

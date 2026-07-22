@@ -85,12 +85,106 @@ For auto-restart while developing: `npm run dev`.
 **Each person running the app needs their own key.** Generations are billed to the
 key's account.
 
+## Updating to a newer version (complete beginner)
+
+New features and fixes land over time. How you update depends on how you first
+**got** the app. Not sure which you did? If your app folder contains a hidden
+`.git` folder, you cloned it — use the git steps. If you downloaded and unzipped
+a file, use the ZIP steps.
+
+Whichever method you use, your personal stuff is always kept:
+
+- **`.env`** — your API key, password, and any settings
+- **`history.json`, `images.json`, `projects.json`** — your generation history,
+  gallery, and projects
+- **the `video` and `images` folders** — your saved videos and reference media
+
+> 💡 Five-second safety net: before updating, make a copy of your whole app
+> folder (right-click → Copy, then Paste) so you can fall back to it if anything
+> goes wrong.
+
+### If you downloaded the ZIP
+
+You're not using git, so you re-download and carry your personal files across:
+
+1. On the project's GitHub page, click the green **`<> Code`** button →
+   **Download ZIP**, and unzip it into a **new** folder (don't overwrite the old
+   one yet).
+2. From your **old** app folder, copy these into the **new** folder, replacing
+   what's there when asked:
+   - the file `.env`
+   - any of `history.json`, `images.json`, `projects.json` that exist
+   - the `video` folder and the `images` folder
+
+   *(These files are hidden from GitHub on purpose, so the new download won't
+   contain them — that's why you copy your own across.)*
+3. Open a terminal in the **new** folder (see the
+   [install guide](INSTALL.md#step-3--open-a-terminal-in-the-project-folder) if
+   you're unsure how) and run:
+
+   ```
+   npm install
+   ```
+
+4. Start it as usual with `npm start`. Once you've confirmed the new folder
+   works, you can delete the old one.
+
+### If you cloned with git
+
+Your personal files are ignored by git, so they're left untouched — updating is
+two commands. Open a terminal in the app folder and run:
+
+```
+git pull
+npm install
+```
+
+Then start it again with `npm start`.
+
+- `git pull` downloads the latest code. `npm install` picks up any new libraries
+  (safe to run even when there are none).
+- If `git pull` prints something about **"local changes"** that would be
+  overwritten, it means you edited a tracked file. If you didn't change anything
+  on purpose, run `git stash` first, then `git pull` again. If you're stuck,
+  the ZIP method above always works as a fallback.
+
 ## Security / sharing notes
 
 - **Never commit `.env`.** It holds your secret API key and is listed in
   `.gitignore`. Only `.env.example` (a key-less template) is tracked.
 - If you deploy this somewhere public, anyone who can reach the URL can spend your
   API credits, since the key lives on the server. Keep it local or behind auth.
+
+## Accessing from other devices on your home network
+
+By default the server listens on `127.0.0.1`, so only the PC it runs on can reach
+it. To open it to your phone/laptop on the same Wi-Fi:
+
+1. Set `HOST=0.0.0.0` in `.env` and restart (`npm start`).
+2. The startup message prints the URL(s) to use, e.g. `http://192.168.1.50:3000`.
+   Enter that on the other device's browser.
+3. On Windows you may get a one-time "Allow Node.js through the firewall" prompt —
+   allow it for **Private** networks only.
+
+By default there is **no login**, so anyone on your network who opens that URL can
+use the app and spend your kie.ai credits. Set a password (below) if you enable
+LAN access. Either way, only enable it on a network you trust, and **never**
+port-forward it or otherwise expose it to the public internet.
+
+## Password protection (optional)
+
+Set `APP_PASSWORD` in `.env` and restart to require a password before the app can
+be used:
+
+```
+APP_PASSWORD=your-shared-password
+```
+
+When set, every page, API call, and saved media file requires signing in first —
+a simple password page appears until you enter it. The sign-in is remembered in a
+cookie for 30 days per browser. Leave `APP_PASSWORD` blank/unset for no login
+(the default). Recommended whenever you turn on LAN access. Note this is a single
+shared password meant for a trusted home network, not per-user accounts.
 
 ## How it works
 
@@ -123,6 +217,10 @@ history.json       generation history (git-ignored, created at runtime)
 images.json        saved-media gallery manifest (git-ignored, created at runtime)
 projects.json      project list (git-ignored, created at runtime)
 ```
+
+The `video/` and `images/` locations can be moved off the app folder by setting
+`VIDEO_DIR` and/or `IMAGES_DIR` in `.env` (absolute path, or relative to the app
+folder). The per-project subfolders are still created inside whatever you choose.
 
 ## License & Disclaimer
 
