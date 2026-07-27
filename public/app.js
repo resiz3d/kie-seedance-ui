@@ -17,6 +17,8 @@ const galleryEmpty = document.getElementById("galleryEmpty");
 const creditsValue = document.getElementById("creditsValue");
 const refreshCredits = document.getElementById("refreshCredits");
 const estimateEl = document.getElementById("estimate");
+const projectCreditsTotal = document.getElementById("projectCreditsTotal");
+const projectCreditsBreakdown = document.getElementById("projectCreditsBreakdown");
 
 // History
 const historyEl = document.getElementById("history");
@@ -1296,7 +1298,62 @@ function openHistoryLightbox(entry) {
   openLightbox(m.kind, m.src, m.name, index >= 0 ? { items, index } : null);
 }
 
+// Human-readable spend category for a model id, used in the per-project credit
+// breakdown. Entries predating model storage were Seedance 2 (matches the
+// estimate code's default), Lite/Pro collapse i2i + t2i into one category.
+function creditCategory(model) {
+  const m = model || "bytedance/seedance-2";
+  if (m.startsWith("seedream/"))
+    return m.includes("5-pro") ? "Seedream Pro" : "Seedream Lite";
+  if (m === "bytedance/seedance-2-fast") return "Seedance 2 Fast";
+  if (m === "bytedance/seedance-2-mini") return "Seedance 2 Mini";
+  if (m === "bytedance/seedance-2") return "Seedance 2";
+  return "Other";
+}
+
+// Total (and per-category) credits spent in the active project, shown in the
+// header line below the account balance.
+function renderProjectCredits() {
+  if (!projectCreditsTotal) return;
+  const entries = historyEntries.filter(
+    (e) => (e.projectId || "default") === activeProjectId
+  );
+  let total = 0;
+  const byCat = new Map();
+  for (const e of entries) {
+    const c = typeof e.costCredits === "number" ? e.costCredits : 0;
+    if (!c) continue;
+    total += c;
+    const cat = creditCategory(e.input?.model);
+    byCat.set(cat, (byCat.get(cat) || 0) + c);
+  }
+  projectCreditsTotal.textContent = `${total.toLocaleString()} credits`;
+
+  projectCreditsBreakdown.innerHTML = "";
+  const rows = [...byCat.entries()].sort((a, b) => b[1] - a[1]);
+  if (!rows.length) {
+    const p = document.createElement("p");
+    p.className = "pc-empty";
+    p.textContent = "No credits spent in this project yet.";
+    projectCreditsBreakdown.appendChild(p);
+    return;
+  }
+  for (const [cat, amt] of rows) {
+    const row = document.createElement("div");
+    row.className = "pc-row";
+    const name = document.createElement("span");
+    name.className = "pc-cat";
+    name.textContent = cat;
+    const val = document.createElement("span");
+    val.className = "pc-amt";
+    val.textContent = amt.toLocaleString();
+    row.append(name, val);
+    projectCreditsBreakdown.appendChild(row);
+  }
+}
+
 function renderHistory(entries) {
+  renderProjectCredits();
   historyEl.innerHTML = "";
   const filter = historyFilter.value || "all"; // used below for the per-entry project label
   const visible = filterHistory(entries);
