@@ -4,6 +4,7 @@ node_modules/
 # user-generated data (downloaded videos, saved reference images, history)
 video/
 images/
+exports/
 history.json
 images.json
 projects.json

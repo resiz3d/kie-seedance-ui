@@ -28,6 +28,9 @@ const AUTH_ENABLED = APP_PASSWORD.length > 0;
 // used as-is. Per-project subfolders are still created inside these.
 const VIDEO_DIR = path.resolve(__dirname, process.env.VIDEO_DIR || "video");
 const IMAGES_DIR = path.resolve(__dirname, process.env.IMAGES_DIR || "images");
+// Where "Export" writes shareable, self-contained history bundles (one subfolder
+// per export). Override via EXPORTS_DIR; created on demand, not at startup.
+const EXPORTS_DIR = path.resolve(__dirname, process.env.EXPORTS_DIR || "exports");
 const HISTORY_FILE = path.join(__dirname, "history.json");
 const IMAGES_FILE = path.join(__dirname, "images.json");
 const PROJECTS_FILE = path.join(__dirname, "projects.json");
@@ -395,6 +398,240 @@ app.post("/api/open-folder", (req, res) => {
     console.error("Failed to open folder:", err);
     res.status(500).json({ code: 500, msg: "Failed to open folder" });
   }
+});
+
+// --- export the visible history to a shareable, self-contained folder ------
+const isImageOutputModel = (model) => (model || "").includes("-to-image");
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+  );
+}
+
+function modelLabel(model) {
+  const m = model || "bytedance/seedance-2";
+  if (m === "bytedance/seedance-2") return "Seedance 2";
+  if (m === "bytedance/seedance-2-fast") return "Seedance 2 Fast";
+  if (m === "bytedance/seedance-2-mini") return "Seedance 2 Mini";
+  const family = m.includes("5-pro") ? "Seedream 5.0 Pro" : "Seedream 5.0 Lite";
+  if (m.includes("text-to-image")) return `${family} (text-to-image)`;
+  if (m.includes("image-to-image")) return `${family} (image-to-image)`;
+  return m;
+}
+
+// Ordered [label, value] rows shown under each entry's prompt.
+function entryMetaRows(entry) {
+  const input = entry.input || {};
+  const rows = [["Model", modelLabel(input.model)]];
+  if (isImageOutputModel(input.model)) {
+    if (input.quality) rows.push(["Quality", input.quality]);
+  } else {
+    if (input.resolution) rows.push(["Resolution", input.resolution]);
+    if (input.duration) rows.push(["Duration", `${input.duration}s`]);
+  }
+  if (input.aspect_ratio) rows.push(["Aspect ratio", input.aspect_ratio]);
+  if (typeof entry.costCredits === "number") rows.push(["Cost", `${entry.costCredits.toLocaleString()} credits`]);
+  if (entry.createdAt) rows.push(["Date", new Date(entry.createdAt).toLocaleString()]);
+  return rows;
+}
+
+// A click-to-enlarge thumbnail (src is our own controlled relative path).
+function exportThumb(kind, src, name) {
+  const s = escapeHtml(src);
+  if (kind === "video") {
+    return `<button class="thumb" onclick="openLb('video','${s}')"><video src="${s}#t=0.1" muted preload="metadata"></video><span class="play">▶</span></button>`;
+  }
+  if (kind === "audio") {
+    return `<button class="thumb audio" onclick="openLb('audio','${s}')"><span class="ico">♪</span><span class="nm">${escapeHtml(name || "audio")}</span></button>`;
+  }
+  return `<button class="thumb" onclick="openLb('image','${s}')"><img src="${s}" loading="lazy" alt="${escapeHtml(name || "")}"></button>`;
+}
+
+function buildExportHtml(view, meta) {
+  const cards = view
+    .map(({ entry, inputs, output }) => {
+      const input = entry.input || {};
+      const metaRows = entryMetaRows(entry)
+        .map(([k, v]) => `<div class="mrow"><span class="mk">${escapeHtml(k)}</span><span class="mv">${escapeHtml(v)}</span></div>`)
+        .join("");
+      const inputThumbs = inputs.map((i) => exportThumb(i.kind, i.src, i.name)).join("");
+      return `<section class="card">
+  <div class="col left">
+    <div class="prompt">${escapeHtml(input.prompt || "(no prompt)")}</div>
+    <div class="meta">${metaRows}</div>
+    ${
+      inputs.length
+        ? `<div class="lbl">Inputs (${inputs.length})</div><div class="thumbs">${inputThumbs}</div>`
+        : `<div class="lbl">Inputs</div><div class="muted">None</div>`
+    }
+  </div>
+  <div class="col right">
+    <div class="lbl">Output</div>
+    ${output ? exportThumb(output.kind, output.src, "") : `<div class="muted">Output not saved locally.</div>`}
+  </div>
+</section>`;
+    })
+    .join("\n");
+
+  return `<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Seedance export — ${escapeHtml(meta.scopeLabel)}</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1115;color:#e6e8ec;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.5}
+  header{padding:1.5rem 1.25rem;border-bottom:1px solid #2a2f3a}
+  h1{margin:0 0 .25rem;font-size:1.3rem}
+  header p{margin:0;color:#8a92a3;font-size:.85rem}
+  main{max-width:1100px;margin:0 auto;padding:1.25rem}
+  .card{display:flex;gap:1rem;background:#181b22;border:1px solid #2a2f3a;border-radius:12px;padding:1rem;margin-bottom:1rem}
+  .col{min-width:0}
+  .left{flex:1.2}
+  .right{flex:1;display:flex;flex-direction:column;align-items:flex-start}
+  .prompt{white-space:pre-wrap;word-break:break-word;margin-bottom:.6rem}
+  .meta{display:flex;flex-wrap:wrap;gap:.35rem .9rem;margin-bottom:.7rem}
+  .mrow{font-size:.78rem}
+  .mk{color:#8a92a3}
+  .mv{color:#e6e8ec;margin-left:.3rem}
+  .lbl{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:#8a92a3;margin:.4rem 0 .35rem}
+  .thumbs{display:flex;flex-wrap:wrap;gap:.5rem}
+  .muted{color:#8a92a3;font-size:.85rem}
+  .thumb{position:relative;padding:0;border:1px solid #2a2f3a;border-radius:8px;overflow:hidden;background:#0f1115;cursor:zoom-in;width:120px;height:120px;display:flex;align-items:center;justify-content:center}
+  .right .thumb{width:100%;height:auto;min-height:160px;max-height:420px}
+  .thumb img,.thumb video{width:100%;height:100%;object-fit:contain;display:block}
+  .right .thumb img,.right .thumb video{max-height:420px}
+  .thumb .play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:#fff;text-shadow:0 1px 4px #000;pointer-events:none}
+  .thumb.audio{flex-direction:column;gap:.25rem;color:#e6e8ec}
+  .thumb.audio .ico{font-size:1.6rem}
+  .thumb.audio .nm{font-size:.65rem;color:#8a92a3;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 .3rem}
+  #lb{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.88);align-items:center;justify-content:center;padding:2rem}
+  #lb img,#lb video{max-width:92vw;max-height:92vh;border-radius:8px}
+  #lb audio{width:min(480px,92vw)}
+  .lb-x{position:fixed;top:16px;right:20px;width:38px;height:38px;border-radius:50%;background:rgba(255,255,255,.14);color:#fff;font-size:22px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+  @media(max-width:640px){.card{flex-direction:column}}
+</style></head><body>
+<header>
+  <h1>Seedance export</h1>
+  <p>${escapeHtml(meta.scopeLabel)} &middot; ${meta.count} generation${meta.count === 1 ? "" : "s"} &middot; <b>${meta.totalCredits.toLocaleString()} credits total</b> &middot; exported ${escapeHtml(new Date().toLocaleString())}</p>
+</header>
+<main>
+${cards}
+</main>
+<div id="lb" onclick="closeLb(event)"><span class="lb-x">&times;</span><div id="lb-c"></div></div>
+<script>
+  function openLb(kind, src){
+    var c=document.getElementById('lb-c'); c.innerHTML='';
+    var el;
+    if(kind==='video'){el=document.createElement('video');el.src=src;el.controls=true;el.autoplay=true;}
+    else if(kind==='audio'){el=document.createElement('audio');el.src=src;el.controls=true;el.autoplay=true;}
+    else{el=document.createElement('img');el.src=src;}
+    c.appendChild(el);
+    document.getElementById('lb').style.display='flex';
+  }
+  function closeLb(e){
+    if(e.target.id==='lb' || (e.target.className && e.target.className.indexOf('lb-x')>-1)){
+      document.getElementById('lb').style.display='none';
+      document.getElementById('lb-c').innerHTML='';
+    }
+  }
+  document.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){document.getElementById('lb').style.display='none';document.getElementById('lb-c').innerHTML='';}
+  });
+</script>
+</body></html>`;
+}
+
+app.post("/api/export", (req, res) => {
+  const { projectId } = req.body || {};
+  // Export is always scoped to a single project — there is no all-projects export.
+  if (!projectId || projectId === "all") {
+    return res.status(400).json({ code: 400, msg: "Choose a specific project to export." });
+  }
+  const scope = resolveProject(projectId);
+
+  const allHistory = readJson(HISTORY_FILE);
+  const entries = allHistory.filter((e) => (e.projectId || "default") === scope.id);
+  if (!entries.length) {
+    return res.status(400).json({ code: 400, msg: "No history to export for this project." });
+  }
+
+  const imgById = new Map(readJson(IMAGES_FILE).map((i) => [i.id, i]));
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19); // 2026-07-30T12-34-56
+  const folderName = `export-${scope.slug}-${stamp}`;
+  const outDir = path.join(EXPORTS_DIR, folderName);
+
+  try {
+    fs.mkdirSync(path.join(outDir, "input"), { recursive: true });
+    fs.mkdirSync(path.join(outDir, "output"), { recursive: true });
+  } catch (err) {
+    console.error("Export: failed to create folder:", err);
+    return res.status(500).json({ code: 500, msg: "Failed to create export folder." });
+  }
+
+  let copied = 0;
+  // Copy a source file into the given subfolder (input/ or output/) under
+  // destName; returns the relative href or null.
+  const copyInto = (srcAbs, subdir, destName) => {
+    try {
+      if (!srcAbs || !fs.existsSync(srcAbs)) return null;
+      fs.copyFileSync(srcAbs, path.join(outDir, subdir, destName));
+      copied++;
+      return `${subdir}/${destName}`;
+    } catch (err) {
+      console.error("Export copy failed:", srcAbs, err.message);
+      return null;
+    }
+  };
+
+  const view = entries.map((entry) => {
+    const media = entry.mediaLocalIds || { image: entry.imageLocalIds || [] };
+    const inputs = [];
+    for (const kind of ["image", "video", "audio"]) {
+      const ids = Array.isArray(media[kind]) ? media[kind] : [];
+      ids.forEach((id, idx) => {
+        const g = imgById.get(id);
+        if (!g) return; // gallery item was deleted — nothing local to copy
+        const ext = path.extname(g.storedName) || "";
+        const href = copyInto(path.join(IMAGES_DIR, g.storedName), "input", `${entry.id}-${kind}-${idx}${ext}`);
+        if (href) inputs.push({ kind, src: href, name: g.name || "" });
+      });
+    }
+
+    let output = null;
+    if (entry.localVideo?.startsWith("/video/")) {
+      const rel = entry.localVideo.slice("/video/".length);
+      const ext = path.extname(rel) || "";
+      const href = copyInto(path.join(VIDEO_DIR, rel), "output", `${entry.id}${ext}`);
+      if (href) output = { kind: isImageOutputModel(entry.input?.model) ? "image" : "video", src: href };
+    }
+    return { entry, inputs, output };
+  });
+
+  try {
+    const totalCredits = entries.reduce((sum, e) => sum + (typeof e.costCredits === "number" ? e.costCredits : 0), 0);
+    const html = buildExportHtml(view, { scopeLabel: scope.name, count: entries.length, totalCredits });
+    fs.writeFileSync(path.join(outDir, "index.html"), html);
+  } catch (err) {
+    console.error("Export: failed to write index.html:", err);
+    return res.status(500).json({ code: 500, msg: "Failed to write export page." });
+  }
+
+  // Best-effort: reveal the finished export in the OS file browser.
+  try {
+    const cmd =
+      process.platform === "win32" ? "explorer" : process.platform === "darwin" ? "open" : "xdg-open";
+    spawn(cmd, [outDir], { detached: true, stdio: "ignore" }).unref();
+  } catch {}
+
+  res.json({
+    code: 200,
+    msg: "exported",
+    data: { folder: folderName, path: outDir, entries: entries.length, filesCopied: copied },
+  });
 });
 
 // --- health check (used by the client's server-down banner) ---------------

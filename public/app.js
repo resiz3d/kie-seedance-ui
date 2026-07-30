@@ -561,6 +561,39 @@ document.getElementById("openFolder").addEventListener("click", async () => {
   }
 });
 
+// Export the currently-filtered history to a shareable, self-contained folder.
+document.getElementById("exportHistory").addEventListener("click", async () => {
+  const btn = document.getElementById("exportHistory");
+  // Export is per-project — the History filter must be on a specific project.
+  const projectId = historyFilter.value;
+  if (!projectId || projectId === "all") {
+    alert('Pick a specific project in the History filter to export (the "All projects" view can\'t be exported).');
+    return;
+  }
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = "Exporting…";
+  try {
+    const res = await fetch("/api/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.msg || "Export failed");
+    alert(
+      `Exported ${data.data.entries} generation(s) (${data.data.filesCopied} files) to:\n\n` +
+        `${data.data.path}\n\n` +
+        `It opened in your file browser. Open index.html to view it, or zip the folder to share.`
+    );
+  } catch (err) {
+    alert(err.message || String(err));
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+});
+
 newProjectBtn.addEventListener("click", async () => {
   const name = prompt("New project name:");
   if (!name?.trim()) return;

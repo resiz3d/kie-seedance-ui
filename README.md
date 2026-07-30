@@ -43,6 +43,15 @@ prompt + reference media, then polls until the video is ready.
   before saving the result to the active project. Deleting a project moves its
   media and history to Default. Pre-project data is auto-migrated to Default on
   first start.
+- **Export** — the **📦 Export** button (next to Open folder) writes the shown
+  history to a new self-contained subfolder in `exports/`: a standalone
+  `index.html` (prompt + reference thumbnails on the left, the result on the
+  right, all click-to-enlarge, with model/resolution/aspect/duration/credit-cost
+  details) plus `input/` and `output/` folders holding copies of every reference
+  and result file. Zip the folder to share it — it needs no server. Exports one
+  project at a time (pick
+  a specific project in the History filter first); override the location with
+  `EXPORTS_DIR` in `.env`.
 - **Live credit balance** — shown in the header (`GET /api/v1/chat/credit`), with a
   refresh button.
 - **Cost estimate** — kie.ai has no price-preview API, so cost is *measured*: the
@@ -213,6 +222,7 @@ public/app.js      form handling, image upload, polling, history
 .env.example       template — copy to .env and add your key
 video/<project>/   downloaded result videos (git-ignored, created at runtime)
 images/<project>/  saved reference media — images/video/audio (git-ignored, created at runtime)
+exports/<name>/    shareable history bundles from the Export button (git-ignored, created at runtime)
 history.json       generation history (git-ignored, created at runtime)
 images.json        saved-media gallery manifest (git-ignored, created at runtime)
 projects.json      project list (git-ignored, created at runtime)
