@@ -67,6 +67,20 @@
           ></textarea>
         </div>
 
+        <div class="field hidden" id="imageSourceField">
+          <div class="field-head">
+            <span>Image source <span class="hint">(reference images and first/last frames can't be combined)</span></span>
+          </div>
+          <div class="checks">
+            <label class="inline">
+              <input type="radio" name="imageSource" value="refs" checked /> Reference images
+            </label>
+            <label class="inline">
+              <input type="radio" name="imageSource" value="frames" /> First / last frames
+            </label>
+          </div>
+        </div>
+
         <div class="field" id="imageField">
           <div class="field-head">
             <span>Reference images <span class="hint">(drag files or URLs in, or click to browse)</span></span>
@@ -81,7 +95,7 @@
 
         <div class="field" id="firstFrameField">
           <div class="field-head">
-            <span>First frame <span class="hint">(Seedance 2.5 — start keyframe, one image)</span></span>
+            <span>First frame <span class="hint">(start keyframe, one image)</span></span>
             <button type="button" id="clear-firstFrame" class="link-btn hidden">Clear</button>
           </div>
           <div id="dz-firstFrame" class="dropzone">
@@ -93,7 +107,7 @@
 
         <div class="field" id="lastFrameField">
           <div class="field-head">
-            <span>Last frame <span class="hint">(Seedance 2.5 — end keyframe, one image)</span></span>
+            <span>Last frame <span class="hint">(end keyframe, one image)</span></span>
             <button type="button" id="clear-lastFrame" class="link-btn hidden">Clear</button>
           </div>
           <div id="dz-lastFrame" class="dropzone">

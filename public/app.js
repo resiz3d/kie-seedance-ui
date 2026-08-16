@@ -869,8 +869,8 @@ const qualitySelect = document.getElementById("quality");
 const aspectSelect = document.getElementById("aspect_ratio");
 
 const VIDEO_ASPECTS = ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
-// Seedance 2.5 adds an "adaptive" ratio (its documented default).
-const VIDEO_ASPECTS_25 = ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
+// Seedance 2.5 and 2.0 Mini add an "adaptive" ratio (2.0 and Fast don't).
+const VIDEO_ASPECTS_ADAPTIVE = ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
 const IMAGE_ASPECTS = ["1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2", "21:9"];
 
 // Output-format options by output medium: [value, label].
@@ -879,6 +879,18 @@ const VIDEO_FORMATS = [["mp4", "mp4"], ["mov", "mov"]];
 
 const isSeedream = () => modelSelect.value.startsWith("seedream/");
 const is25 = () => modelSelect.value === "bytedance/seedance-2-5";
+// Every Seedance video model (2.5 / 2 / Fast / Mini) exposes first/last-frame
+// inputs; 2.5-only extras (mp4/mov, adaptive, 30s, return_last_frame) stay on is25.
+const isSeedanceVideo = () => modelSelect.value.startsWith("bytedance/seedance-");
+
+// Seedance makes reference images and first/last frames mutually exclusive (the
+// API rejects mixing them), so a toggle picks which set is active. Only the active
+// set is shown and sent. `frameMode()` is the raw toggle; `usesFrames()` is true
+// only when a Seedance video model is active AND the toggle is on frames.
+function frameMode() {
+  return document.querySelector('input[name="imageSource"]:checked')?.value || "refs";
+}
+const usesFrames = () => isSeedanceVideo() && frameMode() === "frames";
 const isI2I = () => isSeedream() && modelSelect.value.endsWith("-image-to-image");
 const isT2I = () => isSeedream() && modelSelect.value.endsWith("-text-to-image");
 // all seedream variants end in "-to-image"; video models never do
@@ -890,6 +902,11 @@ const CAPPED_720_MODELS = new Set([
   "bytedance/seedance-2-fast",
   "bytedance/seedance-2-mini",
 ]);
+
+// Models whose aspect_ratio list includes "adaptive" (2.5 and 2.0 Mini per the
+// kie.ai docs; 2.0 and Fast do not offer it).
+const ADAPTIVE_ASPECT_MODELS = new Set(["bytedance/seedance-2-5", "bytedance/seedance-2-mini"]);
+const hasAdaptiveAspect = () => ADAPTIVE_ASPECT_MODELS.has(modelSelect.value);
 const isCapped720 = () => CAPPED_720_MODELS.has(modelSelect.value);
 
 // Short suffix distinguishing the non-standard video variants in labels.
@@ -956,14 +973,22 @@ function applyModelUI() {
   for (const id of ["videoField", "audioField", "resolutionField", "durationField", "genAudioField", "webSearchField"]) {
     document.getElementById(id).classList.toggle("hidden", seedream);
   }
-  // text-to-image takes no references at all — hide the image dropzone + gallery too
-  document.getElementById("imageField").classList.toggle("hidden", isT2I());
-  document.getElementById("galleryWrap").classList.toggle("hidden", isT2I());
+  // Seedance video models make reference images and first/last frames mutually
+  // exclusive, so a toggle chooses which set is shown. `refsHidden` hides
+  // reference images (text-to-image, or any Seedance model in frames mode); the
+  // frame dropzones show only in that mode. "return last frame" is a 2.5-only
+  // output option.
+  const seedanceVideo = isSeedanceVideo();
+  const framesMode = usesFrames();
+  const refsHidden = isT2I() || framesMode;
+  document.getElementById("imageSourceField").classList.toggle("hidden", !seedanceVideo);
+  document.getElementById("imageField").classList.toggle("hidden", refsHidden);
+  document.getElementById("galleryWrap").classList.toggle("hidden", refsHidden);
   document.getElementById("qualityField").classList.toggle("hidden", !seedream);
-  // First/last-frame keyframes and "return last frame" are Seedance 2.5 only.
-  for (const id of ["firstFrameField", "lastFrameField", "returnLastFrameField"]) {
-    document.getElementById(id).classList.toggle("hidden", !frames);
+  for (const id of ["firstFrameField", "lastFrameField"]) {
+    document.getElementById(id).classList.toggle("hidden", !framesMode);
   }
+  document.getElementById("returnLastFrameField").classList.toggle("hidden", !frames);
   // Output format applies to Seedream Pro (png/jpeg) and Seedance 2.5 (mp4/mov).
   const showFormat = isSeedreamPro() || frames;
   document.getElementById("formatField").classList.toggle("hidden", !showFormat);
@@ -971,8 +996,8 @@ function applyModelUI() {
   else if (isSeedreamPro()) setFormatOptions(IMAGE_FORMATS, "png");
   if (seedream) setQualityLabels();
   setAspectOptions(
-    seedream ? IMAGE_ASPECTS : frames ? VIDEO_ASPECTS_25 : VIDEO_ASPECTS,
-    frames ? "adaptive" : "16:9"
+    seedream ? IMAGE_ASPECTS : hasAdaptiveAspect() ? VIDEO_ASPECTS_ADAPTIVE : VIDEO_ASPECTS,
+    frames ? "adaptive" : "16:9" // only 2.5 documents adaptive as its default
   );
   for (const opt of resolutionSelect.options) {
     if (opt.value === "1080p" || opt.value === "4k") opt.disabled = capped;
@@ -1001,6 +1026,10 @@ function updateModelChrome() {
 }
 modelSelect.addEventListener("change", applyModelUI);
 qualitySelect.addEventListener("change", updateEstimate);
+// Switching the 2.5 image-source toggle re-shapes which reference set is shown.
+document
+  .querySelectorAll('input[name="imageSource"]')
+  .forEach((r) => r.addEventListener("change", applyModelUI));
 
 // --- prompt length counter -----------------------------------------------
 // Caps per the model docs: Seedance 20,000; Seedream Lite 3,000; Pro 5,000.
@@ -1167,10 +1196,13 @@ function collectInput(resolved) {
     web_search: document.getElementById("web_search").checked,
     nsfw_checker: document.getElementById("nsfw_checker").checked,
   };
-  // Seedance 2.5 extras: start/end keyframes, output format, last-frame return.
+  // Start/end keyframes — all Seedance video models. `resolved` is already
+  // mode-gated (empty unless the frames toggle is active), so these never coexist
+  // with reference_image_urls.
+  if (resolved.firstFrame?.[0]) input.first_frame_url = resolved.firstFrame[0];
+  if (resolved.lastFrame?.[0]) input.last_frame_url = resolved.lastFrame[0];
+  // 2.5-only extras: output format + last-frame return.
   if (is25()) {
-    if (resolved.firstFrame?.[0]) input.first_frame_url = resolved.firstFrame[0];
-    if (resolved.lastFrame?.[0]) input.last_frame_url = resolved.lastFrame[0];
     input.output_format = document.getElementById("output_format").value;
     input.return_last_frame = document.getElementById("return_last_frame").checked;
   }
@@ -1207,11 +1239,11 @@ form.addEventListener("submit", async (e) => {
   submitBtn.disabled = true;
 
   const mediaLocalIds = {
-    image: isT2I() ? [] : lists.image.localIds(),
+    image: isT2I() || usesFrames() ? [] : lists.image.localIds(),
     video: isSeedream() ? [] : lists.video.localIds(),
     audio: isSeedream() ? [] : lists.audio.localIds(),
-    firstFrame: is25() ? lists.firstFrame.localIds() : [],
-    lastFrame: is25() ? lists.lastFrame.localIds() : [],
+    firstFrame: usesFrames() ? lists.firstFrame.localIds() : [],
+    lastFrame: usesFrames() ? lists.lastFrame.localIds() : [],
   };
 
   const job = {
@@ -1233,12 +1265,13 @@ form.addEventListener("submit", async (e) => {
       card.setStatus("Uploading reference media…");
     }
     resolved = {
-      // only upload the reference kinds the selected model actually uses
-      image: isT2I() ? [] : await lists.image.resolve(),
+      // only upload the reference kinds the selected model+mode actually uses
+      // (2.5 forbids mixing reference images with first/last frames)
+      image: isT2I() || usesFrames() ? [] : await lists.image.resolve(),
       video: isSeedream() ? [] : await lists.video.resolve(),
       audio: isSeedream() ? [] : await lists.audio.resolve(),
-      firstFrame: is25() ? await lists.firstFrame.resolve() : [],
-      lastFrame: is25() ? await lists.lastFrame.resolve() : [],
+      firstFrame: usesFrames() ? await lists.firstFrame.resolve() : [],
+      lastFrame: usesFrames() ? await lists.lastFrame.resolve() : [],
     };
   } catch (err) {
     card.fail(err.message || "Failed to upload reference media.");
@@ -1651,6 +1684,10 @@ function renderHistory(entries) {
 async function applyEntry(entry) {
   const input = entry.input || {};
   modelSelect.value = input.model || "bytedance/seedance-2";
+  // Restore the 2.5 image-source mode (frames if the entry saved either keyframe).
+  const savedMode = input.first_frame_url || input.last_frame_url ? "frames" : "refs";
+  const modeRadio = document.querySelector(`input[name="imageSource"][value="${savedMode}"]`);
+  if (modeRadio) modeRadio.checked = true;
   applyModelUI(); // shape the form (and aspect options) before filling values
   document.getElementById("prompt").value = input.prompt || "";
   document.getElementById("resolution").value = input.resolution || "720p";
