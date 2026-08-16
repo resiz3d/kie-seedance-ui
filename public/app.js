@@ -73,9 +73,6 @@ function removeInflight(taskId) {
   saveInflightList(loadInflightList().filter((j) => j.taskId !== taskId));
 }
 
-// Seed credit rates (credits/sec) measured from real runs; refined from history.
-const SEED_RATES = { "480p": 19, "720p": 41 };
-
 let currentCredits = null;
 let historyEntries = [];
 let galleryItems = [];
@@ -195,7 +192,12 @@ let nextUid = 1;
 
 const KIND_LABEL = { image: "Image", video: "Video", audio: "Audio" };
 
-function makeMediaList(kind) {
+// `kind` is the list's DOM/id namespace (image/video/audio/firstFrame/lastFrame).
+// opts.mediaType is the actual media family for rendering + file-type filtering
+// (defaults to kind); opts.single caps the list at one item (first/last frame).
+function makeMediaList(kind, opts = {}) {
+  const mediaType = opts.mediaType || kind;
+  const single = !!opts.single;
   const dropzone = document.getElementById(`dz-${kind}`);
   const thumbs = document.getElementById(`thumbs-${kind}`);
   const fileInput = document.getElementById(`file-${kind}`);
@@ -211,17 +213,17 @@ function makeMediaList(kind) {
       let n = 0; // numbers only "ready" items, matching the URL order sent
       for (const item of list.items) {
         const div = document.createElement("div");
-        div.className = `thumb ${item.status}${kind === "audio" ? " audio-thumb" : ""}`;
+        div.className = `thumb ${item.status}${mediaType === "audio" ? " audio-thumb" : ""}`;
         div.title = item.name || item.remoteUrl || "";
-        div.draggable = true;
+        div.draggable = !single; // single-item frames don't reorder
 
-        div.appendChild(makeThumbContent(kind, item));
+        div.appendChild(makeThumbContent(mediaType, item));
 
-        if (item.status === "ready") {
+        if (item.status === "ready" && !single) {
           n++;
           const label = document.createElement("span");
           label.className = "img-label";
-          label.textContent = `${KIND_LABEL[kind]}${n}`;
+          label.textContent = `${KIND_LABEL[mediaType]}${n}`;
           div.appendChild(label);
         }
 
@@ -238,7 +240,7 @@ function makeMediaList(kind) {
         div.appendChild(x);
 
         const zoomSrc = item.thumb || item.remoteUrl;
-        if (zoomSrc) div.appendChild(makeZoomButton(kind, zoomSrc, item.name));
+        if (zoomSrc) div.appendChild(makeZoomButton(mediaType, zoomSrc, item.name));
 
         // drag-to-reorder within this list
         div.addEventListener("dragstart", (e) => {
@@ -284,10 +286,11 @@ function makeMediaList(kind) {
 
     addUrl(url) {
       if (!url) return;
+      if (single) list.items = [];
       const entry = { uid: nextUid++, localId: null, remoteUrl: url, thumb: url, name: url, status: "ready" };
       list.items.push(entry);
       list.render();
-      if (kind === "video") {
+      if (mediaType === "video") {
         probeDuration(url).then((d) => {
           entry.durationSec = d;
           updateEstimate();
@@ -297,6 +300,7 @@ function makeMediaList(kind) {
 
     // Read a local file, show a thumbnail, and save it locally only.
     addFile(file) {
+      if (single) list.items = [];
       const reader = new FileReader();
       reader.onload = async () => {
         const entry = {
@@ -321,7 +325,7 @@ function makeMediaList(kind) {
           entry.localId = data.image.id;
           entry.thumb = data.image.localUrl || entry.thumb;
           entry.status = "ready";
-          if (kind === "video") {
+          if (mediaType === "video") {
             probeDuration(entry.thumb).then((d) => {
               entry.durationSec = d;
               updateEstimate();
@@ -338,6 +342,7 @@ function makeMediaList(kind) {
     },
 
     addFromGallery(item) {
+      if (single) list.items = [];
       const entry = {
         uid: nextUid++,
         localId: item.id,
@@ -348,7 +353,7 @@ function makeMediaList(kind) {
       };
       list.items.push(entry);
       list.render();
-      if (kind === "video") {
+      if (mediaType === "video") {
         probeDuration(item.localUrl).then((d) => {
           entry.durationSec = d;
           updateEstimate();
@@ -357,8 +362,9 @@ function makeMediaList(kind) {
     },
 
     addFiles(fileList) {
-      for (const file of fileList) {
-        if (file.type.startsWith(`${kind}/`)) list.addFile(file);
+      const files = single ? [...fileList].slice(0, 1) : [...fileList];
+      for (const file of files) {
+        if (file.type.startsWith(`${mediaType}/`)) list.addFile(file);
       }
     },
 
@@ -485,6 +491,9 @@ const lists = {
   image: makeMediaList("image"),
   video: makeMediaList("video"),
   audio: makeMediaList("audio"),
+  // Seedance 2.5 start/end keyframes — single image each, rendered like images.
+  firstFrame: makeMediaList("firstFrame", { mediaType: "image", single: true }),
+  lastFrame: makeMediaList("lastFrame", { mediaType: "image", single: true }),
 };
 const allItems = () => Object.values(lists).flatMap((l) => l.items);
 
@@ -765,28 +774,47 @@ async function loadCredits() {
 }
 refreshCredits.addEventListener("click", loadCredits);
 
-// credits/sec: average of past runs matching resolution + audio setting, using
-// effective seconds (output duration + reference-video seconds, since video
-// refs appear to bill by combined input+output duration). Seed rates were
-// measured with audio on.
-function ratePerSec(model, resolution, audioOn) {
-  const samples = historyEntries
+// How many of the most-recent matching runs feed a price estimate. Estimates are
+// built from the LATEST runs (not an all-time average) so they track price
+// changes — sales starting or ending — in both directions with no manual reset;
+// taking the median of a few shrugs off the billing noise of overlapping runs.
+const RECENT_RATE_SAMPLES = 3;
+
+function median(nums) {
+  if (!nums.length) return null;
+  const s = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+// The matching history entries, newest first (defensive re-sort — don't rely on
+// stored order). `extra` narrows further (e.g. seedream quality tier).
+function recentMatches(model, extra = () => true) {
+  return historyEntries
     .filter(
       (e) =>
         (e.input?.model || "bytedance/seedance-2") === model &&
-        e.input?.resolution === resolution &&
-        (e.input?.generate_audio !== false) === audioOn &&
         typeof e.costCredits === "number" &&
         e.costCredits > 0 &&
-        e.input?.duration > 0
+        extra(e)
     )
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+}
+
+// credits/sec from the most recent matching runs (video), using effective seconds
+// (output duration + reference-video seconds, since video refs appear to bill by
+// combined input+output duration). Null until at least one matching run exists.
+function ratePerSec(model, resolution, audioOn) {
+  const rates = recentMatches(
+    model,
+    (e) =>
+      e.input?.resolution === resolution &&
+      (e.input?.generate_audio !== false) === audioOn &&
+      e.input?.duration > 0
+  )
+    .slice(0, RECENT_RATE_SAMPLES)
     .map((e) => e.costCredits / (e.input.duration + (e.refVideoSeconds || 0)));
-  if (samples.length) {
-    return { rate: samples.reduce((a, b) => a + b, 0) / samples.length, measured: true };
-  }
-  // seed rates were measured on the standard model only
-  const seed = model === "bytedance/seedance-2" ? SEED_RATES[resolution] : null;
-  return seed ? { rate: seed, measured: false } : null;
+  return rates.length ? { rate: median(rates), n: rates.length } : null;
 }
 
 function updateEstimate() {
@@ -795,23 +823,17 @@ function updateEstimate() {
   // Image models: flat per-generation cost, learned per model + quality tier.
   if (isSeedream()) {
     const quality = qualitySelect.value;
-    const samples = historyEntries
-      .filter(
-        (e) =>
-          e.input?.model === model &&
-          (e.input?.quality || "basic") === quality &&
-          typeof e.costCredits === "number" &&
-          e.costCredits > 0
-      )
+    const costs = recentMatches(model, (e) => (e.input?.quality || "basic") === quality)
+      .slice(0, RECENT_RATE_SAMPLES)
       .map((e) => e.costCredits);
-    if (!samples.length) {
+    if (!costs.length) {
       estimateEl.textContent = `No estimate yet for ${seedreamLabel(model)} (${quality}) — will measure after a run.`;
       estimateEl.title = "";
       return;
     }
-    const est = Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
+    const est = Math.round(median(costs));
     estimateEl.innerHTML = `Est. cost: ~<b>${est.toLocaleString()}</b> credits`;
-    estimateEl.title = "Average of your measured Seedream runs at this quality.";
+    estimateEl.title = `Median of your ${costs.length} most recent ${seedreamLabel(model)} run${costs.length > 1 ? "s" : ""} at this quality.`;
     return;
   }
 
@@ -820,8 +842,7 @@ function updateEstimate() {
   const audioOn = document.getElementById("generate_audio").checked;
   const r = ratePerSec(model, resolution, audioOn);
   if (!r || !duration) {
-    const variant = VIDEO_VARIANT_LABEL[model];
-    const label = variant ? `Seedance 2 ${variant} at ${resolution}` : resolution;
+    const label = `${videoModelLabel(model)} at ${resolution}`;
     estimateEl.textContent = `No estimate yet for ${label} — will measure after a run.`;
     estimateEl.title = "";
     return;
@@ -831,9 +852,7 @@ function updateEstimate() {
   const refNote = refSecs > 0 ? ` (incl. ~${Math.round(refSecs)}s video ref)` : "";
   const overLimit = refSecs > 15 ? ` ⚠ video refs exceed the 15s total limit` : "";
   estimateEl.innerHTML = `Est. cost: ~<b>${est.toLocaleString()}</b> credits${refNote}${overLimit}`;
-  estimateEl.title = r.measured
-    ? "Based on your measured past runs at this resolution/audio setting."
-    : "Approximate, based on a seeded per-second rate. Will refine after you run it.";
+  estimateEl.title = `Based on your ${r.n} most recent run${r.n > 1 ? "s" : ""} at this resolution/audio setting (median).`;
 }
 
 ["resolution", "duration"].forEach((id) =>
@@ -850,23 +869,43 @@ const qualitySelect = document.getElementById("quality");
 const aspectSelect = document.getElementById("aspect_ratio");
 
 const VIDEO_ASPECTS = ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
+// Seedance 2.5 adds an "adaptive" ratio (its documented default).
+const VIDEO_ASPECTS_25 = ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"];
 const IMAGE_ASPECTS = ["1:1", "4:3", "3:4", "16:9", "9:16", "2:3", "3:2", "21:9"];
 
+// Output-format options by output medium: [value, label].
+const IMAGE_FORMATS = [["png", "PNG"], ["jpeg", "JPEG"]];
+const VIDEO_FORMATS = [["mp4", "mp4"], ["mov", "mov"]];
+
 const isSeedream = () => modelSelect.value.startsWith("seedream/");
+const is25 = () => modelSelect.value === "bytedance/seedance-2-5";
 const isI2I = () => isSeedream() && modelSelect.value.endsWith("-image-to-image");
 const isT2I = () => isSeedream() && modelSelect.value.endsWith("-text-to-image");
 // all seedream variants end in "-to-image"; video models never do
 const isImageOutput = (model) => (model || "").includes("-to-image");
 
 // Video variants that top out at 720p (the standard model reaches 1080p/4k).
-const CAPPED_720_MODELS = new Set(["bytedance/seedance-2-fast", "bytedance/seedance-2-mini"]);
+const CAPPED_720_MODELS = new Set([
+  "bytedance/seedance-2-5",
+  "bytedance/seedance-2-fast",
+  "bytedance/seedance-2-mini",
+]);
 const isCapped720 = () => CAPPED_720_MODELS.has(modelSelect.value);
 
 // Short suffix distinguishing the non-standard video variants in labels.
 const VIDEO_VARIANT_LABEL = {
+  "bytedance/seedance-2-5": "2.5",
   "bytedance/seedance-2-fast": "Fast",
   "bytedance/seedance-2-mini": "Mini",
 };
+
+// Full display name for a video model id.
+function videoModelLabel(model) {
+  if (model === "bytedance/seedance-2-5") return "Seedance 2.5";
+  if (model === "bytedance/seedance-2-fast") return "Seedance 2 Fast";
+  if (model === "bytedance/seedance-2-mini") return "Seedance 2 Mini";
+  return "Seedance 2";
+}
 
 // Short display name for a seedream model id, e.g. "Seedream Pro".
 function seedreamLabel(model) {
@@ -890,16 +929,30 @@ function setQualityLabels() {
   }
 }
 
-function setAspectOptions(values) {
+function setAspectOptions(values, preferred = "16:9") {
   const cur = aspectSelect.value;
   aspectSelect.innerHTML = "";
   for (const v of values) aspectSelect.appendChild(new Option(v, v));
-  aspectSelect.value = values.includes(cur) ? cur : values.includes("16:9") ? "16:9" : values[0];
+  aspectSelect.value = values.includes(cur)
+    ? cur
+    : values.includes(preferred)
+    ? preferred
+    : values[0];
+}
+
+// Repopulate the output-format select for the active output medium.
+const outputFormatSelect = document.getElementById("output_format");
+function setFormatOptions(values, def) {
+  const cur = outputFormatSelect.value;
+  outputFormatSelect.innerHTML = "";
+  for (const [v, label] of values) outputFormatSelect.appendChild(new Option(label, v));
+  outputFormatSelect.value = values.some(([v]) => v === cur) ? cur : def;
 }
 
 function applyModelUI() {
   const seedream = isSeedream();
   const capped = isCapped720();
+  const frames = is25();
   for (const id of ["videoField", "audioField", "resolutionField", "durationField", "genAudioField", "webSearchField"]) {
     document.getElementById(id).classList.toggle("hidden", seedream);
   }
@@ -907,15 +960,30 @@ function applyModelUI() {
   document.getElementById("imageField").classList.toggle("hidden", isT2I());
   document.getElementById("galleryWrap").classList.toggle("hidden", isT2I());
   document.getElementById("qualityField").classList.toggle("hidden", !seedream);
-  document.getElementById("formatField").classList.toggle("hidden", !isSeedreamPro());
+  // First/last-frame keyframes and "return last frame" are Seedance 2.5 only.
+  for (const id of ["firstFrameField", "lastFrameField", "returnLastFrameField"]) {
+    document.getElementById(id).classList.toggle("hidden", !frames);
+  }
+  // Output format applies to Seedream Pro (png/jpeg) and Seedance 2.5 (mp4/mov).
+  const showFormat = isSeedreamPro() || frames;
+  document.getElementById("formatField").classList.toggle("hidden", !showFormat);
+  if (frames) setFormatOptions(VIDEO_FORMATS, "mp4");
+  else if (isSeedreamPro()) setFormatOptions(IMAGE_FORMATS, "png");
   if (seedream) setQualityLabels();
-  setAspectOptions(seedream ? IMAGE_ASPECTS : VIDEO_ASPECTS);
+  setAspectOptions(
+    seedream ? IMAGE_ASPECTS : frames ? VIDEO_ASPECTS_25 : VIDEO_ASPECTS,
+    frames ? "adaptive" : "16:9"
+  );
   for (const opt of resolutionSelect.options) {
     if (opt.value === "1080p" || opt.value === "4k") opt.disabled = capped;
   }
   if (capped && (resolutionSelect.value === "1080p" || resolutionSelect.value === "4k")) {
     resolutionSelect.value = "720p";
   }
+  // Seedance 2.5 allows up to 30s; the other video models cap at 15s.
+  const durInput = document.getElementById("duration");
+  durInput.max = frames ? 30 : 15;
+  if (Number(durInput.value) > Number(durInput.max)) durInput.value = durInput.max;
   updatePromptCount(); // the cap depends on the selected model
   updateEstimate();
   updateModelChrome();
@@ -1086,7 +1154,7 @@ function collectInput(resolved) {
     if (isSeedreamPro()) input.output_format = document.getElementById("output_format").value;
     return input;
   }
-  return {
+  const input = {
     model: modelSelect.value,
     prompt: document.getElementById("prompt").value.trim(),
     reference_image_urls: resolved.image,
@@ -1099,6 +1167,14 @@ function collectInput(resolved) {
     web_search: document.getElementById("web_search").checked,
     nsfw_checker: document.getElementById("nsfw_checker").checked,
   };
+  // Seedance 2.5 extras: start/end keyframes, output format, last-frame return.
+  if (is25()) {
+    if (resolved.firstFrame?.[0]) input.first_frame_url = resolved.firstFrame[0];
+    if (resolved.lastFrame?.[0]) input.last_frame_url = resolved.lastFrame[0];
+    input.output_format = document.getElementById("output_format").value;
+    input.return_last_frame = document.getElementById("return_last_frame").checked;
+  }
+  return input;
 }
 
 // --- submit / generate --------------------------------------------------------
@@ -1134,6 +1210,8 @@ form.addEventListener("submit", async (e) => {
     image: isT2I() ? [] : lists.image.localIds(),
     video: isSeedream() ? [] : lists.video.localIds(),
     audio: isSeedream() ? [] : lists.audio.localIds(),
+    firstFrame: is25() ? lists.firstFrame.localIds() : [],
+    lastFrame: is25() ? lists.lastFrame.localIds() : [],
   };
 
   const job = {
@@ -1159,6 +1237,8 @@ form.addEventListener("submit", async (e) => {
       image: isT2I() ? [] : await lists.image.resolve(),
       video: isSeedream() ? [] : await lists.video.resolve(),
       audio: isSeedream() ? [] : await lists.audio.resolve(),
+      firstFrame: is25() ? await lists.firstFrame.resolve() : [],
+      lastFrame: is25() ? await lists.lastFrame.resolve() : [],
     };
   } catch (err) {
     card.fail(err.message || "Failed to upload reference media.");
@@ -1338,6 +1418,7 @@ function creditCategory(model) {
   const m = model || "bytedance/seedance-2";
   if (m.startsWith("seedream/"))
     return m.includes("5-pro") ? "Seedream Pro" : "Seedream Lite";
+  if (m === "bytedance/seedance-2-5") return "Seedance 2.5";
   if (m === "bytedance/seedance-2-fast") return "Seedance 2 Fast";
   if (m === "bytedance/seedance-2-mini") return "Seedance 2 Mini";
   if (m === "bytedance/seedance-2") return "Seedance 2";
@@ -1575,12 +1656,15 @@ async function applyEntry(entry) {
   document.getElementById("resolution").value = input.resolution || "720p";
   if (input.aspect_ratio) aspectSelect.value = input.aspect_ratio;
   qualitySelect.value = input.quality || "basic";
-  document.getElementById("output_format").value = input.output_format || "png";
+  // applyModelUI already set the format options + default for this model; only
+  // override when the saved entry recorded one.
+  if (input.output_format) outputFormatSelect.value = input.output_format;
   updatePromptCount();
-  document.getElementById("duration").value = input.duration || 15;
+  if (input.duration) document.getElementById("duration").value = input.duration;
   document.getElementById("generate_audio").checked = input.generate_audio !== false;
   document.getElementById("web_search").checked = !!input.web_search;
   document.getElementById("nsfw_checker").checked = !!input.nsfw_checker;
+  document.getElementById("return_last_frame").checked = !!input.return_last_frame;
 
   const saved = await fetch("/api/images").then((r) => r.json()).then((d) => d.data || []);
   const localIds = entry.mediaLocalIds || { image: entry.imageLocalIds || [] };
@@ -1588,9 +1672,11 @@ async function applyEntry(entry) {
     image: input.reference_image_urls || input.image_urls || [],
     video: input.reference_video_urls || [],
     audio: input.reference_audio_urls || [],
+    firstFrame: input.first_frame_url ? [input.first_frame_url] : [],
+    lastFrame: input.last_frame_url ? [input.last_frame_url] : [],
   };
 
-  for (const kind of ["image", "video", "audio"]) {
+  for (const kind of ["image", "video", "audio", "firstFrame", "lastFrame"]) {
     lists[kind].items = [];
     const ids = localIds[kind] || [];
     if (ids.length) {

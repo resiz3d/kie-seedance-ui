@@ -1,8 +1,9 @@
 # Seedance 2 App
 
 A tiny web app for generating with [kie.ai](https://kie.ai) models, switchable per
-generation: **Seedance 2** / **Seedance 2 Fast** / **Seedance 2 Mini** (video; Fast
-and Mini are 480p/720p only)
+generation: **Seedance 2.5** / **Seedance 2** / **Seedance 2 Fast** / **Seedance 2
+Mini** (video; 2.5, Fast and Mini are 480p/720p only — 2.5 adds start/end keyframes,
+an adaptive aspect ratio, up to 30s duration, and mp4/mov output)
 and **Seedream 5.0 Lite** image-to-image / text-to-image (the form adapts: quality
 tier instead of resolution/duration, image references only — or none at all for
 text-to-image — and results display as images).

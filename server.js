@@ -337,6 +337,7 @@ async function forward(res, upstreamPromise) {
 
 // --- create generation task ---------------------------------------------
 const ALLOWED_MODELS = new Set([
+  "bytedance/seedance-2-5",
   "bytedance/seedance-2",
   "bytedance/seedance-2-fast",
   "bytedance/seedance-2-mini",
@@ -412,6 +413,7 @@ function escapeHtml(s) {
 
 function modelLabel(model) {
   const m = model || "bytedance/seedance-2";
+  if (m === "bytedance/seedance-2-5") return "Seedance 2.5";
   if (m === "bytedance/seedance-2") return "Seedance 2";
   if (m === "bytedance/seedance-2-fast") return "Seedance 2 Fast";
   if (m === "bytedance/seedance-2-mini") return "Seedance 2 Mini";

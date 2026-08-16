@@ -1,7 +1,7 @@
 {
   "name": "kie-seedance-ui",
   "version": "1.0.0",
-  "description": "Local web UI for kie.ai's Seedance 2 / Seedream 5 models",
+  "description": "Local web UI for kie.ai's Seedance 2.5 / Seedance 2 / Seedream 5 models",
   "type": "module",
   "scripts": {
     "start": "node server.js",

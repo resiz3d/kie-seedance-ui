@@ -44,7 +44,8 @@
         <label>
           Model
           <select id="model">
-            <option value="bytedance/seedance-2" selected>Seedance 2</option>
+            <option value="bytedance/seedance-2-5" selected>Seedance 2.5 (480p/720p only)</option>
+            <option value="bytedance/seedance-2">Seedance 2</option>
             <option value="bytedance/seedance-2-fast">Seedance 2 Fast (480p/720p only)</option>
             <option value="bytedance/seedance-2-mini">Seedance 2 Mini (480p/720p only)</option>
             <option value="seedream/5-lite-image-to-image">Seedream 5.0 Lite (image-to-image)</option>
@@ -75,6 +76,30 @@
             <div id="thumbs-image" class="thumbs"></div>
             <p class="dz-hint">Drop images here or <span class="browse">browse</span></p>
             <input id="file-image" type="file" accept="image/png,image/jpeg,image/jpg,image/webp" multiple hidden />
+          </div>
+        </div>
+
+        <div class="field" id="firstFrameField">
+          <div class="field-head">
+            <span>First frame <span class="hint">(Seedance 2.5 — start keyframe, one image)</span></span>
+            <button type="button" id="clear-firstFrame" class="link-btn hidden">Clear</button>
+          </div>
+          <div id="dz-firstFrame" class="dropzone">
+            <div id="thumbs-firstFrame" class="thumbs"></div>
+            <p class="dz-hint">Drop an image here or <span class="browse">browse</span></p>
+            <input id="file-firstFrame" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif" hidden />
+          </div>
+        </div>
+
+        <div class="field" id="lastFrameField">
+          <div class="field-head">
+            <span>Last frame <span class="hint">(Seedance 2.5 — end keyframe, one image)</span></span>
+            <button type="button" id="clear-lastFrame" class="link-btn hidden">Clear</button>
+          </div>
+          <div id="dz-lastFrame" class="dropzone">
+            <div id="thumbs-lastFrame" class="thumbs"></div>
+            <p class="dz-hint">Drop an image here or <span class="browse">browse</span></p>
+            <input id="file-lastFrame" type="file" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif" hidden />
           </div>
         </div>
 
@@ -162,6 +187,9 @@
           </label>
           <label class="inline">
             <input id="nsfw_checker" type="checkbox" /> NSFW checker
+          </label>
+          <label class="inline hidden" id="returnLastFrameField">
+            <input id="return_last_frame" type="checkbox" /> Return last frame
           </label>
         </div>
 
