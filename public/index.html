@@ -210,13 +210,6 @@
           </label>
         </div>
 
-        <!-- Its own row (not hidden in ComfyUI mode, unlike the checks above). -->
-        <div class="checks" id="previewRow">
-          <label class="inline" title="Embed an inline video/image player on the finished job card. Off = just a link (still saved to History).">
-            <input id="generate_preview" type="checkbox" checked /> Generate preview
-          </label>
-        </div>
-
         <div class="submit-row">
           <button type="submit" id="submitBtn">Generate</button>
           <label class="queue-count hidden" id="comfyCountField" title="Queue this many generations">
@@ -226,14 +219,8 @@
         </div>
       </form>
 
-      <!-- One card per in-flight/finished generation; multiple run concurrently. -->
-      <div id="jobsHeader" class="jobs-header hidden">
-        <button type="button" id="closeAllJobs" class="btn-secondary">Close All</button>
-      </div>
-
       <!-- Live host stats while a local ComfyUI run is in flight. -->
       <div id="comfyStats" class="comfy-stats hidden" title="Host CPU / GPU utilization and VRAM usage"></div>
-      <section id="jobs" class="jobs hidden"></section>
 
       <pre id="error" class="hidden"></pre>
 

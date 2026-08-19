@@ -41,7 +41,7 @@ while writing a different value — handy for on/off toggles:
 
 ```jsonc
 // strength 1 = on, 0 = off; the dropdown shows "Enabled" / "Disabled"
-"142": { "inputs": { "strength_model": "{{turbo_lora=1|Enabled=1|Disabled=0}}" } },
+"20": { "inputs": { "strength_model": "{{extra_lora=1|Enabled=1|Disabled=0}}" } },
 "124": { "inputs": { "steps": "{{steps=8}}" } }
 ```
 
@@ -64,8 +64,17 @@ The control is chosen from the token, in this order:
 | Name contains `audio` | audio upload (checked before video, so `ref_video_audio` reads as audio) |
 | Name contains `video` | video upload |
 | Name contains `image` / `img` / `frame` / `photo` / `picture` | image upload |
+| ComfyUI reports the field as a **combo** (checkpoint, LoRA, VAE, `sampler_name`, `scheduler`, …) | dropdown of the installed choices (from `/object_info`) |
+| ComfyUI reports the field as **FLOAT/INT** | number box using the field's min/max/step |
 | Name contains a numeric hint (`seed`, `steps`, `cfg`, `width`, `height`, `length`, `duration`, `fps`, `frames`, `count`, `denoise`, `strength`, `scale`, `megapixel`, `batch`) **or** the default is a number | number box (a `seed` box also gets a 🎲 and a **control-after-generate** dropdown) |
 | otherwise | single-line text box |
+
+Media vs. combo is decided by the node **input**, not the token name: an
+*uploadable* input (`LoadImage.image`, `VHS_LoadVideo.video`, `VHS_LoadAudioUpload.audio`)
+gets the upload dropzone, while a model-file selector (`vae_name`, `ckpt_name`,
+`unet_name`, `lora_name`, `clip_name`, …) gets the installed-file dropdown — so a
+token named `video_vae` on a `vae_name` input is correctly a VAE picker, not a video
+upload.
 
 Image / video / audio controls all save dropped files to the project gallery and
 offer **Pick from gallery**; the chosen file is uploaded to ComfyUI at generate
@@ -79,10 +88,11 @@ mode itself is part of last-used settings, so it's remembered per workflow.
 
 **Defaults.** A token's `=default` sets the starting value in the JSON — the way to
 bake in a default (e.g. `{{steps=8}}`). On top of that, the form **remembers your
-last-used settings per workflow**: after you run one, it reopens prefilled with what
-you last used — control values, the media files you picked (by gallery reference),
-and the seed's fixed/increment/randomize mode. Last-used settings override the token
-defaults; clear your browser storage to reset them.
+last-used settings per workflow** — control values, the media files you picked (by
+gallery reference), the seed's fixed/increment/randomize mode, and your LoRA list.
+These are saved **server-side** (see [Per-workflow settings](#per-workflow-settings))
+so they're shared across devices, and they override the token defaults. Delete the
+workflow's `settings/comfy/<name>.json` to reset.
 
 **Layout hints.** Controls render in a 12-column grid. A token can carry trailing
 `;`-separated hints to control its layout — they're ignored when the value is sent:
@@ -96,7 +106,7 @@ defaults; clear your browser storage to reset them.
 // half-width, shown first
 "115": { "inputs": { "aspect_ratio": "{{aspect_ratio=3:4 (Portrait Standard)|... ; 1/2 ; #1}}" } },
 // quarter-width, shown eighth
-"142": { "inputs": { "strength_model": "{{turbo_lora=1|Enabled=1|Disabled=0 ; 1/4 ; #8}}" } }
+"20": { "inputs": { "strength_model": "{{extra_lora=1|Enabled=1|Disabled=0 ; 1/4 ; #8}}" } }
 ```
 
 To force a dropdown for something like an aspect-ratio node, list the exact strings
@@ -106,6 +116,78 @@ the node accepts:
 "115": { "inputs": { "aspect_ratio":
   "{{aspect_ratio=3:4 (Portrait Standard)|16:9 (Landscape Standard)|1:1 (Square)}}" } }
 ```
+
+## Models, LoRAs, VAEs & samplers (from ComfyUI)
+
+Tokenize a loader/sampler field and the app fills its dropdown from your **live
+ComfyUI install** — no need to list options by hand:
+
+```jsonc
+"4":  { "inputs": { "ckpt_name":  "{{model}}" } },        // → checkpoint dropdown
+"10": { "inputs": { "vae_name":   "{{vae}}" } },          // → VAE dropdown
+"14": { "inputs": { "lora_name":  "{{lora}}",             // → LoRA dropdown
+                    "strength_model": "{{lora_strength=0.8}}" } },
+"12": { "inputs": { "sampler_name": "{{sampler}}",        // → sampler dropdown
+                    "scheduler":    "{{scheduler}}" } }    // → scheduler dropdown
+```
+
+The choices come from ComfyUI's `/object_info`, so a dropdown shows exactly what's
+installed; numeric fields (`strength_model`, `cfg`, `steps`, …) pick up their real
+min/max/step from the same source. **ComfyUI must be running** to build these
+controls — if it's offline the form shows a notice and those pickers don't populate
+(text/number controls still work). No `|option|` list needed; only add one if you
+want to force specific choices.
+
+These installed-file pickers (and the LoRA section below) render inside a collapsed
+**ComfyUI Settings** drawer at the bottom of the form, so a workflow's loader
+dropdowns don't clutter the main controls. Width/order hints (`; full`, `; #1`, …)
+still order them within the drawer.
+
+### Dynamic LoRAs
+
+Separately from any tokenized `lora_name`, the **ComfyUI Settings** drawer has a
+**LoRAs** section: click
+**+ Add LoRA**, pick a file from your installed LoRAs, and type a **strength**
+(keyboard entry, e.g. `0.3`, `0.85`, range **−5 to 5**). Add as many as you like.
+
+These are spliced into the workflow at generate time — the app inserts a chain of
+`LoraLoader` nodes between the checkpoint's MODEL/CLIP and everything that consumes
+them, so **any checkpoint workflow** gets extra LoRAs without being pre-wired. If a
+workflow has no MODEL input to attach to (e.g. some video pipelines), adding a LoRA
+surfaces an error (the run can't be queued). Workflows without a CLIP encoder use
+`LoraLoaderModelOnly` (model-only) automatically.
+
+### Optional / bypassable nodes
+
+Mark a node `_meta.bypassable` and the **ComfyUI Settings** drawer shows an
+**enable/disable** checkbox directly above that node's controls; unchecking it hides
+those controls and **removes the node** at generate time, reconnecting its
+passthrough (its `model` link input → whatever consumed its output), so an optional
+custom node can be turned off for anyone who doesn't have it installed:
+
+```jsonc
+"400": {
+  "inputs": { "sage_attention": "{{sage_attention=auto}}", "model": ["127", 0] },
+  "class_type": "PathchSageAttentionKJ",
+  "_meta": { "title": "Patch Sage Attention KJ", "bypassable": true }
+}
+```
+
+Best for single-in/single-out model "patch" nodes (Sage Attention, model-sampling
+patches, …) — the passthrough is taken from the node's `model` input (or its sole
+link input). The bundled MiniMax workflow ships this exact node: pick its
+`sage_attention` mode from the drawer, or uncheck **Patch Sage Attention KJ** to run
+without it.
+
+### Per-workflow settings
+
+Your picks — control values, chosen model/LoRA/VAE/sampler, media, seed mode, the
+LoRA list, and node enable/disable toggles — are saved **server-side** per workflow
+in `settings/comfy/<name>.json`
+(override the folder with `COMFY_SETTINGS_DIR`). Because it lives on the server, the
+same config is shared across every device that opens the app — including your phone
+over LAN — and it survives a browser-cache clear. Re-selecting the workflow (or
+re-importing a run from History) reloads it.
 
 ## Image inputs & the gallery
 
@@ -151,20 +233,19 @@ grouped field, which always fills in order.)
    the same request** (so a dropped connection right after — common on mobile —
    can't orphan the run); the app then polls `/history/{id}`. While it runs,
    the server also listens on ComfyUI's `/ws` and reports **live progress** (sampler
-   step count) — the job card shows a bar and `step N/M (X%)` — plus a **host-stats
-   strip** (CPU %, GPU %, VRAM) above the job cards. The strip is shown whenever a
+   step count) — the run's **pending History card** shows a bar and
+   `step N/M (X%) · elapsed · ETA` (with a **Cancel** button) — plus a **host-stats
+   strip** (CPU %, GPU %, VRAM) above History. The strip is shown whenever a
    ComfyUI workflow is selected (refreshing every 5s, or every 2s during a run) so you
    can watch VRAM even between runs. GPU %/VRAM come from `nvidia-smi` when available;
    without it, VRAM falls back to ComfyUI's `/system_stats` and GPU % is shown as `–`.
 4. The first video/animation/image output is downloaded into your `video/<project>/`
-   folder and added to History — the **same folders and History** as a kie.ai
-   generation, so mixed local+API projects export together. No credits are involved.
-   The History entry records the **run-time** (wall time from submit to finished
-   output), shown as `⏱ 2m 34s` in the entry's meta line. The finished job card
-   previews the **downloaded local copy** (ComfyUI's `/view` URL doesn't render a
-   reliable inline poster). Uncheck **Generate preview** before running to skip the
-   inline player entirely (job card shows a link, History shows a click-to-open
-   tile) — handy when you don't need to watch every result. It's still saved.
+   folder and the run's History card updates to the result — the **same folders and
+   History** as a kie.ai generation, so mixed local+API projects export together. No
+   credits are involved. The card records the **run-time** (wall time from submit to
+   finished output), shown as `⏱ 2m 34s` in its meta line, and its thumbnail is the
+   **downloaded local copy** (ComfyUI's `/view` URL doesn't render a reliable inline
+   poster).
 
 A pending run is finished by whichever poller sees it done first: the browser, or a
 **server-side sweep** (every ~15s). The sweep is the safety net — it copies the
@@ -184,8 +265,8 @@ in-memory record is gone: after a short grace the entry is marked failed with a 
 - Re-import from History reselects the workflow, refills text/number/dropdown
   values, and re-populates the media fields from the run's saved gallery files
   (any file since deleted from the gallery is skipped).
-- Errors from ComfyUI surface on the job card in readable form: a validation
-  rejection (e.g. a model that isn't installed) is parsed from `node_errors` into
+- Errors from ComfyUI surface on the run's History card in readable form: a
+  validation rejection (e.g. a model that isn't installed) is parsed from `node_errors` into
   lines like `CheckpointLoaderSimple (node 12): Value not in list — ckpt_name: '…'
   not in […]`, and a mid-run failure shows the failing node type + exception message.
   Common runtime failures get a short headline instead of the raw traceback: **out
@@ -194,5 +275,6 @@ in-memory record is gone: after a short grace the entry is marked failed with a 
   every control type: `prompt` (text), up to **9 image / 3 video / 3 audio**
   optional references (`picture1`…`picture9`, `ref_video1`…, `ref_audio1`…),
   `seed`/`duration`/`steps` (numbers), `aspect_ratio`/`megapixels`/`scheduler`/`ref_image_size`
-  (dropdowns), and `turbo_lora` (Enabled/Disabled toggle via `Label=value`), plus
-  width/order layout hints.
+  (inline dropdowns), and `model`/`clip`/`video_vae`/`audio_vae` (installed-file
+  pickers from `/object_info`, shown in the **ComfyUI Settings** drawer), plus
+  width/order layout hints. Add extra LoRAs via the drawer's **LoRAs** section.

@@ -41,6 +41,9 @@ const PROJECTS_FILE = path.join(__dirname, "projects.json");
 // with {{name=default|opt|opt}} placeholders. See docs/COMFYUI.md.
 const COMFYUI_URL = (process.env.COMFYUI_URL || "http://127.0.0.1:8188").replace(/\/+$/, "");
 const WORKFLOWS_DIR = path.resolve(__dirname, process.env.WORKFLOWS_DIR || "workflows");
+// Per-workflow config (chosen model/LoRA/VAE/sampler + the dynamic LoRA list),
+// stored server-side so it's shared across devices (incl. the phone over LAN).
+const COMFY_SETTINGS_DIR = path.resolve(__dirname, process.env.COMFY_SETTINGS_DIR || "settings/comfy");
 
 if (!API_KEY) {
   console.error(
@@ -498,6 +501,80 @@ app.get("/api/workflows", (req, res) => {
   res.json({ code: 200, msg: "success", data: list });
 });
 
+// Enriched token metadata for one workflow: combo tokens get their installed-file
+// options and numeric tokens get min/max/step, both from ComfyUI's /object_info.
+// Also returns the installed LoRA list for the dynamic-LoRA picker. `offline: true`
+// when ComfyUI is unreachable (the client then locks the picker controls).
+app.get("/api/comfy/workflow-meta", async (req, res) => {
+  const wfPath = workflowPath(req.query.file);
+  if (!wfPath || !fs.existsSync(wfPath)) return res.status(400).json({ code: 400, msg: "Unknown workflow file" });
+  let workflow, tokens;
+  try {
+    const text = fs.readFileSync(wfPath, "utf8");
+    workflow = JSON.parse(text);
+    tokens = parseWorkflowTokens(text);
+  } catch (err) {
+    return res.status(400).json({ code: 400, msg: `Workflow is not valid JSON: ${err.message}` });
+  }
+  // Attach each token's node input key (e.g. `vae_name`, `image`) — available even
+  // offline, and used to tell a model-file selector from a media-upload field.
+  const nodeMap = mapTokenNodes(workflow);
+  const withKeys = tokens.map((t) => ({
+    ...t,
+    inputKey: nodeMap.get(t.name)?.input || null,
+    nodeId: nodeMap.get(t.name)?.id || null,
+  }));
+  const bypassable = bypassableNodes(workflow); // enable/disable toggles (offline-safe)
+  let objectInfo;
+  try {
+    objectInfo = await getObjectInfo();
+  } catch {
+    return res.json({
+      code: 200,
+      msg: "success",
+      data: { offline: true, tokens: withKeys, loraOptions: [], bypassable },
+    });
+  }
+  const enriched = withKeys.map((t) => enrichToken(t, nodeMap, objectInfo));
+  res.json({
+    code: 200,
+    msg: "success",
+    data: { offline: false, tokens: enriched, loraOptions: loraOptionsFrom(objectInfo), bypassable },
+  });
+});
+
+// Per-workflow saved config (chosen values + LoRA list), stored server-side so
+// it's shared across devices. Read {} when nothing saved yet.
+function comfySettingsPath(file) {
+  const base = path.basename(String(file || ""), ".json").replace(/[^a-zA-Z0-9._-]/g, "_");
+  return base ? path.join(COMFY_SETTINGS_DIR, `${base}.json`) : null;
+}
+app.get("/api/comfy/settings", (req, res) => {
+  const p = comfySettingsPath(req.query.file);
+  if (!p) return res.status(400).json({ code: 400, msg: "file is required" });
+  let data = {};
+  if (fs.existsSync(p)) {
+    try {
+      data = JSON.parse(fs.readFileSync(p, "utf8"));
+    } catch {
+      data = {};
+    }
+  }
+  res.json({ code: 200, msg: "success", data });
+});
+app.put("/api/comfy/settings", (req, res) => {
+  const p = comfySettingsPath(req.query.file);
+  if (!p) return res.status(400).json({ code: 400, msg: "file is required" });
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    writeJson(p, req.body && typeof req.body === "object" ? req.body : {});
+    res.json({ code: 200, msg: "saved" });
+  } catch (err) {
+    console.error("Failed to save comfy settings:", err);
+    res.status(500).json({ code: 500, msg: "Failed to save settings" });
+  }
+});
+
 // Upload one image into ComfyUI's input folder; returns the LoadImage-ready name.
 // Source is either a base64 data URL or a saved gallery item `id` (so ComfyUI
 // inputs are the same locally-stored files the API side uses).
@@ -562,6 +639,195 @@ function pruneWorkflow(workflow, pruneNames) {
     }
   }
   return workflow;
+}
+
+// --- ComfyUI /object_info: available files + input metadata -------------------
+// Cached briefly so the workflow-meta endpoint and lora injection don't hammer it.
+let objectInfoCache = null;
+let objectInfoAt = 0;
+const OBJECT_INFO_TTL_MS = 30000;
+async function getObjectInfo(force = false) {
+  if (!force && objectInfoCache && Date.now() - objectInfoAt < OBJECT_INFO_TTL_MS) return objectInfoCache;
+  const r = await fetch(`${COMFYUI_URL}/object_info`);
+  if (!r.ok) throw new Error(`object_info ${r.status}`);
+  objectInfoCache = await r.json();
+  objectInfoAt = Date.now();
+  return objectInfoCache;
+}
+
+// Map each token name → the node id + class_type + input key it first appears in,
+// so we can look its allowed values / numeric range up in /object_info and group it
+// under its node's enable/disable toggle.
+function mapTokenNodes(workflow) {
+  const map = new Map();
+  for (const [id, node] of Object.entries(workflow || {})) {
+    const cls = node?.class_type;
+    if (!cls || !node.inputs) continue;
+    for (const [k, v] of Object.entries(node.inputs)) {
+      if (typeof v !== "string") continue;
+      const re = /\{\{([\s\S]*?)\}\}/g;
+      let m;
+      while ((m = re.exec(v)) !== null) {
+        const name = parseTokenSpec(m[1]).name;
+        if (name && !map.has(name)) map.set(name, { id, classType: cls, input: k });
+      }
+    }
+  }
+  return map;
+}
+
+// Attach /object_info metadata to a token: a combo (enum) becomes a dropdown of the
+// installed files/choices; a FLOAT/INT gets its min/max/step. Author-supplied
+// inline options (|a|b) always win. A combo that's an *uploadable* media input
+// (LoadImage.image, VHS_LoadVideo.video, …) carries `uploadKind` so the UI shows an
+// upload dropzone instead of a file dropdown — distinguishing e.g. `video`
+// (uploadable) from `vae_name` (a model-file picker whose token happens to be named
+// "video_vae").
+function enrichToken(token, nodeMap, objectInfo) {
+  if (token.options && token.options.length) return token;
+  const loc = nodeMap.get(token.name);
+  if (!loc) return token;
+  const info = objectInfo?.[loc.classType];
+  const spec = info?.input?.required?.[loc.input] || info?.input?.optional?.[loc.input];
+  if (!Array.isArray(spec)) return token;
+  const [type, cfg] = spec;
+  if (Array.isArray(type)) {
+    const key = (loc.input || "").toLowerCase();
+    let uploadKind = null;
+    if (cfg?.image_upload || key === "image") uploadKind = "image";
+    else if (cfg?.video_upload || key === "video") uploadKind = "video";
+    else if (cfg?.audio_upload || key === "audio") uploadKind = "audio";
+    return { ...token, combo: true, comboOptions: type, uploadKind };
+  }
+  if (type === "FLOAT" || type === "INT") {
+    // ComfyUI reports "unbounded" fields with sentinel bounds (±sys.maxsize,
+    // ±float_max). Passed to <input min/max>, those break the spinner: the browser
+    // uses `min` as the stepping base and at ~1e18+ magnitude can't represent normal
+    // values, so the arrows do nothing. Drop bounds beyond the safe-integer range so
+    // the field is treated as unbounded (arrows work) instead.
+    const sane = (v) => (Number.isFinite(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER ? v : null);
+    return {
+      ...token,
+      num: type === "INT" ? "int" : "float",
+      min: sane(cfg?.min),
+      max: sane(cfg?.max),
+      step: sane(cfg?.step) ?? (type === "INT" ? 1 : null),
+    };
+  }
+  return token;
+}
+
+// The installed LoRA file list (for the dynamic-LoRA picker).
+function loraOptionsFrom(objectInfo) {
+  return (
+    objectInfo?.LoraLoader?.input?.required?.lora_name?.[0] ||
+    objectInfo?.LoraLoaderModelOnly?.input?.required?.lora_name?.[0] ||
+    []
+  );
+}
+
+// --- dynamic LoRA injection --------------------------------------------------
+const clampStrength = (v) => Math.max(-5, Math.min(5, Number(v) || 0));
+const linkEq = (a, b) =>
+  Array.isArray(a) && a.length === 2 && Array.isArray(b) && String(a[0]) === String(b[0]) && a[1] === b[1];
+
+// Splice a chain of LoraLoader nodes between the workflow's MODEL/CLIP source and
+// everything that consumes them — so any workflow gets extra LoRAs without being
+// pre-wired. `loras` is [{name, strength}]. Throws if no MODEL source is found.
+function injectLoras(workflow, loras) {
+  const enabled = (Array.isArray(loras) ? loras : []).filter((l) => l && l.name);
+  if (!enabled.length) return workflow;
+
+  const samplerClasses = new Set(["KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced"]);
+  const linkInput = (pred) => {
+    // Prefer a sampler's model link; fall back to any node with a `model` link input.
+    for (const node of Object.values(workflow)) {
+      if (samplerClasses.has(node.class_type) && Array.isArray(node.inputs?.model) && pred("model", node)) {
+        return node.inputs.model;
+      }
+    }
+    for (const node of Object.values(workflow)) {
+      if (Array.isArray(node.inputs?.model)) return node.inputs.model;
+    }
+    return null;
+  };
+  const modelSource = linkInput(() => true);
+  if (!modelSource) throw new Error("Couldn't find a MODEL input to attach LoRAs to (is this a checkpoint workflow?).");
+
+  let clipSource = null;
+  for (const node of Object.values(workflow)) {
+    // Any CLIP text encoder (CLIPTextEncode, CLIPTextEncodeSDXL, …) with a clip link.
+    if (/cliptextencode/i.test(node.class_type || "") && Array.isArray(node.inputs?.clip)) {
+      clipSource = node.inputs.clip;
+      break;
+    }
+  }
+  const useClip = !!clipSource;
+
+  // Capture consumers of the original sources BEFORE adding the lora nodes.
+  const modelConsumers = [];
+  const clipConsumers = [];
+  for (const [id, node] of Object.entries(workflow)) {
+    for (const [k, v] of Object.entries(node.inputs || {})) {
+      if (linkEq(v, modelSource)) modelConsumers.push([id, k]);
+      if (useClip && linkEq(v, clipSource)) clipConsumers.push([id, k]);
+    }
+  }
+
+  let nextId = 1 + Math.max(0, ...Object.keys(workflow).map((k) => Number(k)).filter(Number.isFinite));
+  let prevModel = modelSource;
+  let prevClip = clipSource;
+  for (const l of enabled) {
+    const id = String(nextId++);
+    const s = clampStrength(l.strength);
+    if (useClip) {
+      workflow[id] = {
+        class_type: "LoraLoader",
+        inputs: { lora_name: l.name, strength_model: s, strength_clip: s, model: prevModel, clip: prevClip },
+      };
+      prevModel = [id, 0];
+      prevClip = [id, 1];
+    } else {
+      workflow[id] = {
+        class_type: "LoraLoaderModelOnly",
+        inputs: { lora_name: l.name, strength_model: s, model: prevModel },
+      };
+      prevModel = [id, 0];
+    }
+  }
+  for (const [id, k] of modelConsumers) workflow[id].inputs[k] = prevModel;
+  if (useClip) for (const [id, k] of clipConsumers) workflow[id].inputs[k] = prevClip;
+  return workflow;
+}
+
+// Remove an optional "patch" node (e.g. Sage Attention) and reconnect its
+// passthrough, so it can be disabled for users who don't have that custom node
+// installed. The passthrough source is the node's `model` link input (or its sole
+// link input); consumers of the node's output are rewired to that source.
+function bypassNode(workflow, id) {
+  const node = workflow[id];
+  if (!node) return;
+  const linkInputs = Object.entries(node.inputs || {}).filter(([, v]) => Array.isArray(v) && v.length === 2);
+  const src =
+    (Array.isArray(node.inputs?.model) && node.inputs.model) ||
+    (linkInputs.length === 1 ? linkInputs[0][1] : null);
+  for (const n of Object.values(workflow)) {
+    for (const [k, v] of Object.entries(n.inputs || {})) {
+      if (Array.isArray(v) && v.length === 2 && String(v[0]) === String(id)) {
+        if (src) n.inputs[k] = src;
+        else delete n.inputs[k];
+      }
+    }
+  }
+  delete workflow[id];
+}
+
+// Nodes an author marked `_meta.bypassable` — the UI offers an enable/disable toggle
+// for each (so an optional custom node can be turned off).
+function bypassableNodes(workflow) {
+  return Object.entries(workflow || {})
+    .filter(([, n]) => n?._meta?.bypassable)
+    .map(([id, n]) => ({ id, title: n._meta.title || `Node ${id}` }));
 }
 
 // --- ComfyUI errors → friendly text ------------------------------------------
@@ -741,7 +1007,7 @@ async function comfyVram() {
 // orphan the run).
 app.post("/api/comfy/generate", async (req, res) => {
   ensureComfyWs(); // start listening for progress before the run begins
-  const { file, values, prune, input, mediaLocalIds, projectId, refVideoSeconds } = req.body || {};
+  const { file, values, prune, loras, bypass, input, mediaLocalIds, projectId, refVideoSeconds } = req.body || {};
   const wfPath = workflowPath(file);
   if (!wfPath || !fs.existsSync(wfPath)) {
     return res.status(400).json({ code: 400, msg: "Unknown workflow file" });
@@ -751,8 +1017,10 @@ app.post("/api/comfy/generate", async (req, res) => {
     workflow = JSON.parse(fs.readFileSync(wfPath, "utf8"));
     workflow = pruneWorkflow(workflow, prune); // drop empty optional reference loaders
     workflow = substituteWorkflow(workflow, values || {});
+    for (const id of Array.isArray(bypass) ? bypass : []) bypassNode(workflow, String(id)); // disabled patch nodes
+    workflow = injectLoras(workflow, loras); // splice in any dynamically-added LoRAs
   } catch (err) {
-    return res.status(400).json({ code: 400, msg: `Workflow is not valid JSON: ${err.message}` });
+    return res.status(400).json({ code: 400, msg: err.message || "Workflow could not be prepared" });
   }
   try {
     const r = await fetch(`${COMFYUI_URL}/prompt`, {
@@ -1548,6 +1816,20 @@ app.post("/api/history/:id/result", async (req, res) => {
   entry.runtimeMs = Date.now() - new Date(entry.createdAt).getTime();
   writeJson(HISTORY_FILE, entries);
   res.json({ code: 200, msg: "updated", data: entry });
+});
+
+// Mark a still-pending entry failed (definitive failure or user cancel). Guarded on
+// `pending` so it never clobbers a finished entry (e.g. one the sweep completed).
+app.post("/api/history/:id/fail", (req, res) => {
+  const entries = readJson(HISTORY_FILE);
+  const entry = entries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ code: 404, msg: "history entry not found" });
+  if (entry.status === "pending") {
+    entry.status = "failed";
+    entry.error = String(req.body?.error || "Generation failed.");
+    writeJson(HISTORY_FILE, entries);
+  }
+  res.json({ code: 200, msg: "ok", data: entry });
 });
 
 app.get("/api/history", (req, res) => {

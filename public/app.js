@@ -1,11 +1,6 @@
 const form = document.getElementById("genForm");
 const submitBtn = document.getElementById("submitBtn");
 
-// Container for per-generation job cards (many can run at once).
-const jobsEl = document.getElementById("jobs");
-const jobsHeader = document.getElementById("jobsHeader");
-const closeAllJobsBtn = document.getElementById("closeAllJobs");
-
 const errorEl = document.getElementById("error");
 
 // Gallery
@@ -1045,7 +1040,7 @@ function applyModelUI() {
     // Swap the whole kie.ai form for token-driven workflow controls.
     for (const id of KIE_FIELDS) document.getElementById(id).classList.add("hidden");
     estimateEl.classList.add("hidden");
-    renderComfyControls();
+    comfyRenderPromise = renderComfyControls(); // async (fetches ComfyUI options); awaited on re-import
     updateModelChrome();
     return;
   }
@@ -1129,6 +1124,7 @@ modelSelect.addEventListener("change", () => {
   }
 });
 qualitySelect.addEventListener("change", updateEstimate);
+
 // Switching the 2.5 image-source toggle re-shapes which reference set is shown.
 document
   .querySelectorAll('input[name="imageSource"]')
@@ -1143,6 +1139,9 @@ document
 let comfyWorkflows = [];
 const comfyControlsEl = document.getElementById("comfyControls");
 let comfyFields = []; // [{ name, getValue() }] for the active workflow
+let comfyLoraControl = null; // the dynamic-LoRA section for the active workflow
+let comfyBypassControl = null; // enable/disable toggles for bypassable patch nodes
+let comfyRenderPromise = null; // resolves when the active workflow's controls are built
 
 const escapeHtmlJs = (s) =>
   String(s ?? "").replace(
@@ -1193,10 +1192,23 @@ function restoreLastModel() {
 function comfyControlType(token) {
   if (token.options?.length) return "select";
   const n = token.name.toLowerCase();
+  const key = (token.inputKey || "").toLowerCase();
   if (/prompt/.test(n)) return "textarea";
-  if (/audio/.test(n)) return "audio";
-  if (/video/.test(n)) return "video";
-  if (/(image|img|frame|photo|picture)/.test(n)) return "image";
+  // Online, /object_info is authoritative. A combo is a dropdown of installed
+  // choices (checkpoints, LoRAs, VAEs, samplers, schedulers) — UNLESS it's an
+  // uploadable media input (LoadImage.image, VHS_LoadVideo.video), which carries
+  // `uploadKind` and gets the upload dropzone instead.
+  if (token.combo) return token.uploadKind || "select";
+  if (token.num) return "number";
+  // Offline / non-combo fallback by name. A model-file selector input (vae_name,
+  // ckpt_name, unet_name, lora_name, clip_name, …) is never a media upload even if
+  // its token name contains "video"/"audio" (e.g. `video_vae`).
+  const isModelField = /_name$/.test(key) || /^(ckpt|unet|vae|lora|clip|model|control_net|style_model|gligen)/.test(key);
+  if (!isModelField) {
+    if (/audio/.test(n)) return "audio";
+    if (/video/.test(n)) return "video";
+    if (/(image|img|frame|photo|picture)/.test(n)) return "image";
+  }
   if (
     /(seed|steps|cfg|width|height|length|duration|fps|frames|count|denoise|strength|scale|megapixel|batch)/.test(n) ||
     (token.default !== "" && !Number.isNaN(Number(token.default)))
@@ -1347,9 +1359,13 @@ function makeComfyMedia(token, mediaKind) {
 }
 
 // Render the controls for the selected workflow.
-function renderComfyControls() {
+let comfyRenderSeq = 0;
+async function renderComfyControls() {
+  const seq = ++comfyRenderSeq;
   comfyControlsEl.innerHTML = "";
   comfyFields = [];
+  comfyLoraControl = null;
+  comfyBypassControl = null;
   const wf = comfyWorkflows.find((w) => w.file === comfyFile());
   if (!wf) {
     comfyControlsEl.innerHTML = `<p class="muted">Workflow not found — try reloading.</p>`;
@@ -1365,11 +1381,34 @@ function renderComfyControls() {
       `It will run exactly as saved. Add tokens like <code>{{prompt}}</code> to expose controls.</p>`;
     return;
   }
+
+  comfyControlsEl.innerHTML = `<p class="muted">Loading options from ComfyUI…</p>`;
+  // Enriched tokens (combo file lists + numeric ranges) + installed LoRAs, from
+  // ComfyUI's /object_info. Falls back to the raw tokens (offline) — the picker
+  // controls then can't populate, and we show an offline notice.
+  let meta = { offline: true, tokens: wf.tokens, loraOptions: [], bypassable: [] };
+  try {
+    const r = await fetch(`/api/comfy/workflow-meta?file=${encodeURIComponent(wf.file)}`);
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.code === 200 && d.data) meta = d.data;
+  } catch {
+    /* offline — meta stays with raw tokens */
+  }
+  if (seq !== comfyRenderSeq) return; // a newer workflow was selected meanwhile
+  comfyControlsEl.innerHTML = "";
+  if (meta.offline) {
+    const note = document.createElement("p");
+    note.className = "muted comfy-offline";
+    note.textContent = "⚠ ComfyUI is offline — start it to choose models / LoRAs / VAEs / samplers.";
+    comfyControlsEl.appendChild(note);
+  }
+  const tokens = meta.tokens || wf.tokens;
+
   // Build render items, grouping numbered media tokens (picture1, picture2, …)
   // into one multi-upload control per series — like the kie.ai reference fields.
   const items = [];
   const seriesByKey = new Map();
-  wf.tokens.forEach((token, scanIndex) => {
+  tokens.forEach((token, scanIndex) => {
     const type = comfyControlType(token);
     if (MEDIA_TYPES.has(type)) {
       const m = token.name.match(/^(.*?)(\d+)$/);
@@ -1397,6 +1436,7 @@ function renderComfyControls() {
   // Order by the "; #N" hint; items without one keep scan order, after ordered ones.
   items.sort((a, b) => (a.order ?? 1000 + a.scanIndex) - (b.order ?? 1000 + b.scanIndex));
 
+  const settingsScalars = [];
   for (const it of items) {
     if (it.kind === "series") {
       const entries = it.entries.sort((a, b) => a.index - b.index);
@@ -1409,18 +1449,179 @@ function renderComfyControls() {
       ctrl.el.style.gridColumn = `span ${comfySpan(it.token, it.type)}`;
       comfyControlsEl.appendChild(ctrl.el);
       comfyFields.push(ctrl);
+    } else if (it.token.combo) {
+      settingsScalars.push(it); // installed-file pickers live in the settings drawer
     } else {
-      renderScalarControl(it.token, it.type);
+      renderScalarControl(it.token, it.type, comfyControlsEl);
     }
   }
-  // Overlay last-used values (over the token defaults) so the form reopens with
-  // what you last ran.
-  const saved = loadComfyDefaults(wf.file);
-  if (saved) prefillComfyControls(saved);
+
+  // "ComfyUI Settings" drawer (collapsed): the installed-file/choice pickers from
+  // /object_info (model, VAE, CLIP, sampler…) plus the dynamic LoRA section — kept
+  // out of the main form so a pile of loader dropdowns doesn't clutter it.
+  const details = document.createElement("details");
+  details.className = "comfy-settings";
+  details.style.gridColumn = "span 12";
+  const summary = document.createElement("summary");
+  summary.textContent = "ComfyUI Settings";
+  details.appendChild(summary);
+  const body = document.createElement("div");
+  body.className = "comfy-settings-body comfy-grid";
+  details.appendChild(body);
+  // Enable/disable toggles for optional patch nodes (e.g. Sage Attention). Each
+  // node's controls render inside its toggle's group (hidden when disabled); the
+  // checkbox sits directly above them.
+  comfyBypassControl = (meta.bypassable || []).length ? makeComfyBypassControl(meta.bypassable) : null;
+  const bypassIds = new Set((meta.bypassable || []).map((b) => String(b.id)));
+  for (const it of settingsScalars) {
+    const nid = String(it.token.nodeId ?? "");
+    if (comfyBypassControl && bypassIds.has(nid)) {
+      renderScalarControl(it.token, it.type, comfyBypassControl.mountGroup(body, nid));
+    } else {
+      renderScalarControl(it.token, it.type, body);
+    }
+  }
+  if (comfyBypassControl) comfyBypassControl.mountRemaining(body); // toggles with no controls
+  comfyLoraControl = makeComfyLoraControl(meta.loraOptions || [], !!meta.offline);
+  body.appendChild(comfyLoraControl.el);
+  comfyControlsEl.appendChild(details);
+
+  // Overlay this workflow's saved config (server-side settings file) so the form
+  // reopens with what you last ran — values, media, seed mode, and LoRAs.
+  try {
+    const s = await fetch(`/api/comfy/settings?file=${encodeURIComponent(wf.file)}`).then((r) => r.json());
+    if (seq !== comfyRenderSeq) return;
+    const settings = s?.data || {};
+    prefillComfyControls(settings);
+    if (comfyLoraControl && Array.isArray(settings.loras)) comfyLoraControl.setLoras(settings.loras);
+    if (comfyBypassControl && Array.isArray(settings.bypass)) comfyBypassControl.setDisabled(settings.bypass);
+  } catch {
+    /* no saved settings — token defaults stand */
+  }
 }
 
-// Build one scalar control (select / number / text / textarea) and register it.
-function renderScalarControl(token, type) {
+// Enable/disable for the workflow's bypassable patch nodes. Each node gets a
+// checkbox that sits directly above that node's controls; unchecking it hides those
+// controls and removes the node server-side (its passthrough reconnected), so an
+// optional custom node (e.g. Sage Attention) can be turned off if you don't have it.
+function makeComfyBypassControl(bypassable) {
+  const nodes = new Map(); // nodeId -> { checkbox, controlsEl, wrapper, mounted }
+  for (const b of bypassable) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "comfy-bypass-group";
+    wrapper.style.gridColumn = "span 12";
+    const label = document.createElement("label");
+    label.className = "inline bypass-toggle";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true; // enabled by default
+    label.append(cb, document.createTextNode(` ${b.title}`));
+    const controlsEl = document.createElement("div");
+    controlsEl.className = "bypass-controls comfy-grid";
+    wrapper.append(label, controlsEl);
+    const sync = () => controlsEl.classList.toggle("hidden", !cb.checked);
+    cb.addEventListener("change", sync);
+    sync();
+    nodes.set(String(b.id), { checkbox: cb, controlsEl, wrapper, mounted: false });
+  }
+  return {
+    // Append the node's group to `container` (once) and return its controls slot.
+    mountGroup(container, id) {
+      const n = nodes.get(String(id));
+      if (!n) return container;
+      if (!n.mounted) { container.appendChild(n.wrapper); n.mounted = true; }
+      return n.controlsEl;
+    },
+    // Append any toggles that had no controls to render (bare enable/disable).
+    mountRemaining(container) {
+      for (const n of nodes.values()) if (!n.mounted) { container.appendChild(n.wrapper); n.mounted = true; }
+    },
+    // Ids of nodes to bypass (the unchecked ones).
+    getDisabled: () => [...nodes].filter(([, n]) => !n.checkbox.checked).map(([id]) => id),
+    setDisabled: (ids) => {
+      const off = new Set((ids || []).map(String));
+      for (const [id, n] of nodes) {
+        n.checkbox.checked = !off.has(id);
+        n.controlsEl.classList.toggle("hidden", !n.checkbox.checked);
+      }
+    },
+  };
+}
+
+// The dynamic-LoRA section: rows of {file dropdown, strength (keyboard, −5..5)}
+// plus an "Add LoRA" button. LoRAs are spliced into the graph server-side.
+function makeComfyLoraControl(loraOptions, offline) {
+  const field = document.createElement("div");
+  field.className = "field comfy-loras";
+  field.style.gridColumn = "span 12";
+  field.innerHTML =
+    `<div class="field-head"><span>LoRAs ` +
+    `<span class="hint">(added on top of the workflow · strength −5 to 5)</span></span></div>` +
+    `<div class="lora-rows"></div>`;
+  const rowsEl = field.querySelector(".lora-rows");
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "btn-secondary lora-add";
+  addBtn.textContent = "+ Add LoRA";
+  field.appendChild(addBtn);
+
+  if (offline) {
+    const n = document.createElement("p");
+    n.className = "muted";
+    n.textContent = "Start ComfyUI to add LoRAs.";
+    field.appendChild(n);
+    addBtn.disabled = true;
+  }
+
+  const addRow = (name = "", strength = 1) => {
+    const row = document.createElement("div");
+    row.className = "lora-row";
+    const sel = document.createElement("select");
+    sel.className = "lora-name";
+    for (const o of loraOptions) sel.appendChild(new Option(o, o));
+    if (name && loraOptions.includes(name)) sel.value = name;
+    else if (name) {
+      sel.appendChild(new Option(`${name} (not installed)`, name));
+      sel.value = name;
+    }
+    const str = document.createElement("input");
+    str.type = "number";
+    str.className = "lora-strength";
+    str.min = -5;
+    str.max = 5;
+    str.step = 0.01;
+    str.value = strength;
+    str.title = "Strength (−5 to 5)";
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "x";
+    rm.textContent = "×";
+    rm.title = "Remove LoRA";
+    rm.addEventListener("click", () => row.remove());
+    row.append(sel, str, rm);
+    rowsEl.appendChild(row);
+  };
+  addBtn.addEventListener("click", () => addRow(loraOptions[0] || "", 1));
+
+  return {
+    el: field,
+    getLoras: () =>
+      [...rowsEl.querySelectorAll(".lora-row")]
+        .map((r) => ({
+          name: r.querySelector(".lora-name").value,
+          strength: Number(r.querySelector(".lora-strength").value),
+        }))
+        .filter((l) => l.name),
+    setLoras: (arr) => {
+      rowsEl.innerHTML = "";
+      for (const l of arr || []) addRow(l.name, typeof l.strength === "number" ? l.strength : 1);
+    },
+  };
+}
+
+// Build one scalar control (select / number / text / textarea) and register it,
+// appending it to `container` (the main grid, or the ComfyUI Settings drawer).
+function renderScalarControl(token, type, container = comfyControlsEl) {
   const field = document.createElement("div");
   field.className = "field";
   field.style.gridColumn = `span ${comfySpan(token, type)}`;
@@ -1430,24 +1631,28 @@ function renderScalarControl(token, type) {
   field.appendChild(head);
   let afterMode = null; // seed "control after generate" <select>, if present
 
-  // Options are "value" or "Label=value" (e.g. Enabled=1|Disabled=0), so a
-  // dropdown can show a friendly label while writing a different value.
+  // A combo token's options come from ComfyUI (plain installed-file names); an
+  // author's inline options are "value" or "Label=value" (e.g. Enabled=1|Disabled=0)
+  // so the dropdown can show a friendly label while writing a different value.
   const parsedOptions =
     type === "select"
-      ? token.options.map((o) => {
-          const i = o.indexOf("=");
+      ? (token.combo ? token.comboOptions || [] : token.options || []).map((o) => {
+          if (token.combo) return { label: String(o), value: String(o) };
+          const i = String(o).indexOf("=");
           return i >= 0 ? { label: o.slice(0, i).trim(), value: o.slice(i + 1).trim() } : { label: o, value: o };
         })
       : [];
-  // A dropdown whose option values are all numbers should send a number.
+  // A dropdown whose option values are all numbers should send a number (never for
+  // a combo, whose values are filenames/choices).
   const numericSelect =
-    type === "select" && parsedOptions.every((o) => o.value !== "" && !Number.isNaN(Number(o.value)));
+    type === "select" && !token.combo && parsedOptions.length > 0 &&
+    parsedOptions.every((o) => o.value !== "" && !Number.isNaN(Number(o.value)));
 
   let input;
   if (type === "select") {
     input = document.createElement("select");
     for (const o of parsedOptions) input.appendChild(new Option(o.label, o.value));
-    input.value = parsedOptions.some((o) => o.value === token.default) ? token.default : parsedOptions[0].value;
+    input.value = parsedOptions.some((o) => o.value === token.default) ? token.default : parsedOptions[0]?.value ?? "";
   } else if (type === "textarea") {
     input = document.createElement("textarea");
     input.rows = 4;
@@ -1456,6 +1661,12 @@ function renderScalarControl(token, type) {
     input = document.createElement("input");
     input.type = type === "number" ? "number" : "text";
     input.value = token.default || "";
+    // Numeric range/step from /object_info, when the field carried it.
+    if (type === "number") {
+      if (token.min != null) input.min = token.min;
+      if (token.max != null) input.max = token.max;
+      if (token.step != null) input.step = token.step;
+    }
     if (type === "number" && token.name.toLowerCase().includes("seed")) {
       // "Control after generate" mirrors ComfyUI's seed widget: how the seed
       // changes for the next run after you queue one.
@@ -1475,7 +1686,7 @@ function renderScalarControl(token, type) {
     }
   }
   field.appendChild(input);
-  comfyControlsEl.appendChild(field);
+  container.appendChild(field);
   const readValue = () => (type === "number" || numericSelect ? Number(input.value) : input.value);
   const ctrl = {
     name: token.name,
@@ -1608,28 +1819,27 @@ async function restoreComfyMedia(entry) {
   }
 }
 
-// Last-used values per workflow (localStorage) so the form reopens with what you
-// last ran — including the media files you picked (by gallery id/url, under
-// `__media`). Token `=default`s are the base; these override them.
-const comfyDefaultsKey = (file) => `comfy_defaults:${file}`;
-function loadComfyDefaults(file) {
-  try {
-    return JSON.parse(localStorage.getItem(comfyDefaultsKey(file)) || "null");
-  } catch {
-    return null;
-  }
-}
-function saveComfyDefaults(file) {
-  const defaults = { __media: {}, __after: {} };
+// Per-workflow config, saved server-side (settings/comfy/<file>.json) so it's
+// shared across devices: control values, media picks (by gallery id/url under
+// `__media`), seed modes (`__after`), and the dynamic LoRA list. Loaded in
+// renderComfyControls; token `=default`s are the base and these override them.
+async function saveComfySettings(file) {
+  const data = { __media: {}, __after: {} };
   for (const f of comfyFields) {
-    if (typeof f.peekMedia === "function") defaults.__media[f.mediaKey] = f.peekMedia();
-    else if (typeof f.peek === "function") defaults[f.name] = f.peek();
-    if (typeof f.peekAfter === "function") defaults.__after[f.name] = f.peekAfter();
+    if (typeof f.peekMedia === "function") data.__media[f.mediaKey] = f.peekMedia();
+    else if (typeof f.peek === "function") data[f.name] = f.peek();
+    if (typeof f.peekAfter === "function") data.__after[f.name] = f.peekAfter();
   }
+  if (comfyLoraControl) data.loras = comfyLoraControl.getLoras();
+  if (comfyBypassControl) data.bypass = comfyBypassControl.getDisabled();
   try {
-    localStorage.setItem(comfyDefaultsKey(file), JSON.stringify(defaults));
-  } catch {
-    /* storage full/blocked — non-fatal */
+    await fetch(`/api/comfy/settings?file=${encodeURIComponent(file)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+  } catch (err) {
+    console.error("Failed to save comfy settings:", err);
   }
 }
 
@@ -1669,6 +1879,8 @@ async function submitComfy() {
   hide(errorEl);
   submitBtn.disabled = true;
   const count = comfyQueueCount();
+  const loras = comfyLoraControl ? comfyLoraControl.getLoras() : [];
+  const bypass = comfyBypassControl ? comfyBypassControl.getDisabled() : [];
   try {
     for (let i = 0; i < count; i++) {
       const { values, prune } = await collectComfyValues();
@@ -1680,26 +1892,24 @@ async function submitComfy() {
           if (localId) mediaIds[f.mediaKind]?.push(localId);
         }
       }
-      const input = {
-        model: `comfy:${wf.file}`,
-        workflow: wf.name,
-        values,
-        generatePreview: document.getElementById("generate_preview").checked,
-      };
+      const input = { model: `comfy:${wf.file}`, workflow: wf.name, values };
+      if (loras.length) input.loras = loras;
+      if (bypass.length) input.bypass = bypass;
       if (typeof values.prompt === "string" && values.prompt.trim()) input.prompt = values.prompt.trim();
-      await queueComfyRun(wf, values, prune, mediaIds, input);
+      await queueComfyRun(wf, values, prune, mediaIds, input, loras, bypass);
       // Advance seeds for the next queued run (no-op when the mode is "fixed").
       for (const f of comfyFields) if (typeof f.advance === "function") f.advance();
     }
-    saveComfyDefaults(wf.file); // remember the final values
+    saveComfySettings(wf.file); // remember the final values + LoRAs (server-side)
   } finally {
     submitBtn.disabled = false;
   }
 }
 
-// Queue one ComfyUI run: create its card, submit, save the prompt to History
-// immediately, wire Cancel, and start polling.
-async function queueComfyRun(wf, values, prune, mediaIds, input) {
+// Queue one ComfyUI run: one request queues it AND creates the pending History
+// entry server-side (so a dropped connection can't orphan it — the sweep finishes
+// it). Then attach a live status to that pending card, wire Cancel, and poll.
+async function queueComfyRun(wf, values, prune, mediaIds, input, loras, bypass) {
   const job = {
     jobId: nextJobId++,
     taskId: null,
@@ -1708,13 +1918,7 @@ async function queueComfyRun(wf, values, prune, mediaIds, input) {
     projectId: activeProjectId,
     startedAt: Date.now(),
   };
-  const card = createJobCard(job);
-  card.el.classList.add("comfy-job"); // marks local runs for the host-stats readout
   try {
-    card.setStatus("Queueing on ComfyUI…");
-    // One request queues the run AND creates the pending History entry server-side,
-    // so a dropped connection right after (common on mobile) can't orphan the run —
-    // the server-side sweep still finishes it.
     const res = await fetch("/api/comfy/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1722,6 +1926,8 @@ async function queueComfyRun(wf, values, prune, mediaIds, input) {
         file: wf.file,
         values,
         prune,
+        loras: loras || [],
+        bypass: bypass || [],
         input: job.input,
         mediaLocalIds: job.mediaLocalIds,
         projectId: job.projectId,
@@ -1734,68 +1940,77 @@ async function queueComfyRun(wf, values, prune, mediaIds, input) {
     }
     job.taskId = data.data.promptId;
     job.historyId = data.data.historyId || null;
-    card.setTaskId(job.taskId);
-    card.setStatus("Generating on ComfyUI… this can take a while.");
-    loadHistory(); // show the server-created pending entry
+    const live = createLiveStatus(job);
+    live.setStatus("Generating on ComfyUI… this can take a while.");
+    if (job.historyId) liveStatus.set(job.historyId, live);
+    wireComfyCancel(job);
     addInflight(job);
-    wireComfyCancel(job, card);
-    pollComfyJob(job, card);
+    loadHistory(); // renders the pending entry with the live status inside
+    pollComfyJob(job);
   } catch (err) {
-    card.fail(err.message || String(err));
+    // Couldn't queue (e.g. missing node) — no History entry was created; surface it.
+    setError(err.message || String(err));
   }
 }
 
 // Poll a ComfyUI job (server normalizes /history into the kie.ai status shape).
-async function pollComfyJob(job, card) {
+async function pollComfyJob(job) {
   if (job.cancelled) return; // stopped by the user
+  const live = liveOf(job);
+  let data;
   try {
     const res = await fetch(`/api/comfy/status?promptId=${encodeURIComponent(job.taskId)}`);
     if (job.cancelled) return; // cancelled while this poll was in flight
-    const data = await res.json();
-    if (!res.ok || data.code !== 200) {
-      if (res.status >= 400 && res.status < 500) removeInflight(job.taskId);
-      throw new Error(data.msg || `Status check failed (${res.status})`);
-    }
-    const state = data.data?.state;
-    if (state === "success") {
+    data = await res.json();
+    if (res.status >= 400 && res.status < 500) {
+      // Definitive client error — the task is gone/invalid.
       removeInflight(job.taskId);
-      const url = JSON.parse(data.data.resultJson || "{}").resultUrls?.[0];
-      if (!url) throw new Error("Finished, but ComfyUI returned no output file.");
-      // Preview the downloaded local copy (ComfyUI's /view URL renders blank inline).
-      const localUrl = await attachHistoryResult(job, url, null);
-      const preview = localUrl || url;
-      card.showResult(isImageFile(preview), preview, "", wantsPreview(job)); // local model — no credit cost
+      await failJob(job, data.msg || `Status check failed (${res.status})`);
       return;
     }
-    if (state === "fail") {
-      removeInflight(job.taskId);
-      loadHistory(); // the server sweep marks the entry failed too; refresh to match
-      throw new Error(data.data?.failMsg || "ComfyUI generation failed.");
-    }
-    if (state === "lost") {
-      // ComfyUI has no record of this prompt (usually it was restarted). Allow a
-      // couple polls of grace for the brief submit→queue race, then stop spinning.
-      job.lostCount = (job.lostCount || 0) + 1;
-      if (job.lostCount < 3) {
-        setTimeout(() => pollComfyJob(job, card), POLL_INTERVAL_MS);
-        return;
-      }
-      removeInflight(job.taskId);
-      loadHistory(); // the server sweep flips the entry off "Generating…"; refresh
-      throw new Error(
-        "ComfyUI has no record of this run — it was likely restarted. If its output is in " +
-          "ComfyUI's output folder it couldn't be copied automatically; re-run to regenerate."
-      );
-    }
-    // Still running — surface live step progress if ComfyUI reported any (this
-    // also drives the elapsed/ETA clock on the card).
-    const prog = data.data?.progress;
-    if (prog && prog.max > 0) card.setProgress(prog.value, prog.max);
-    setTimeout(() => pollComfyJob(job, card), POLL_INTERVAL_MS);
-  } catch (err) {
-    if (job.cancelled) return; // cancellation isn't a failure
-    card.fail(err.message || String(err));
+    if (!res.ok || data.code !== 200) throw new Error(data.msg || `Status check failed (${res.status})`);
+  } catch {
+    // Transient (network / 5xx) — leave the entry pending and retry.
+    if (job.cancelled) return;
+    if (live) live.setStatus("Reconnecting to ComfyUI…");
+    setTimeout(() => pollComfyJob(job), POLL_INTERVAL_MS);
+    return;
   }
+
+  const state = data.data?.state;
+  if (state === "success") {
+    removeInflight(job.taskId);
+    finishLive(job);
+    const url = JSON.parse(data.data.resultJson || "{}").resultUrls?.[0];
+    if (!url) return failJob(job, "Finished, but ComfyUI returned no output file.");
+    await attachHistoryResult(job, url, null); // downloads, marks done, refreshes History
+    return;
+  }
+  if (state === "fail") {
+    removeInflight(job.taskId);
+    await failJob(job, data.data?.failMsg || "ComfyUI generation failed.");
+    return;
+  }
+  if (state === "lost") {
+    // ComfyUI has no record of this prompt (usually it was restarted). A couple of
+    // polls of grace for the brief submit→queue race, then stop.
+    job.lostCount = (job.lostCount || 0) + 1;
+    if (job.lostCount < 3) {
+      setTimeout(() => pollComfyJob(job), POLL_INTERVAL_MS);
+      return;
+    }
+    removeInflight(job.taskId);
+    await failJob(
+      job,
+      "ComfyUI has no record of this run — it was likely restarted. If its output is in " +
+        "ComfyUI's output folder it couldn't be copied automatically; re-run to regenerate."
+    );
+    return;
+  }
+  // Still running — surface live step progress (drives the elapsed/ETA clock).
+  const prog = data.data?.progress;
+  if (live && prog && prog.max > 0) live.setProgress(prog.value, prog.max);
+  setTimeout(() => pollComfyJob(job), POLL_INTERVAL_MS);
 }
 
 // --- prompt length counter -----------------------------------------------
@@ -1820,42 +2035,21 @@ promptEl.addEventListener("input", updatePromptCount);
 updatePromptCount();
 
 // --- helpers ----------------------------------------------------------------
-// Form-level error (validation / pre-submit failures). Per-job errors live on
-// the job card instead — see JobCard.fail().
+// Form-level error (validation / pre-submit failures). Per-run failures are
+// persisted onto the run's History entry instead — see failJob().
 function setError(msg) {
   errorEl.textContent = msg;
   show(errorEl);
 }
 
-// --- job cards ---------------------------------------------------------------
-// Each generation gets its own card so many can run at once. A card walks
-// through: submitting → generating → (success shows the result | fail shows the
-// error). Terminal cards get a dismiss × and stay until the user clears them.
+// --- live status (in the pending History card) --------------------------------
+// A generation's live status/progress lives on its (up-front) pending History
+// card, so there's no separate "job card". `liveStatus` maps a pending entry's id
+// to a controller that owns a status element; renderHistory drops that element into
+// the pending card and re-parents it across re-renders, so the poller's reference
+// stays valid.
 let nextJobId = 1;
-
-// Finished/failed cards — the ones safe to dismiss ("running" ones are still
-// working and have no × yet, so Close All leaves them alone).
-function terminalCards() {
-  return [...jobsEl.querySelectorAll(".job-card")].filter((c) => c.dataset.status !== "running");
-}
-
-// Keep the container + Close All header in sync with the cards on screen.
-function updateJobsChrome() {
-  jobsEl.classList.toggle("hidden", jobsEl.children.length === 0);
-  // Only worth a bulk control once there's more than one preview to clear.
-  jobsHeader.classList.toggle("hidden", terminalCards().length < 2);
-}
-
-closeAllJobsBtn.addEventListener("click", () => {
-  for (const card of terminalCards()) card.remove();
-  updateJobsChrome();
-});
-
-// Whether to embed an inline media preview on the finished job card. Off when the
-// run was submitted with "Generate preview" unchecked (persisted on the input).
-function wantsPreview(job) {
-  return job?.input?.generatePreview !== false;
-}
+const liveStatus = new Map(); // historyId -> controller
 
 // Human-readable elapsed/ETA, e.g. "8s", "2m 05s", "1h 03m".
 function fmtDuration(ms) {
@@ -1867,183 +2061,100 @@ function fmtDuration(ms) {
   return `${h}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
-function createJobCard(job) {
-  const card = document.createElement("div");
-  card.className = "job-card";
-  card.dataset.status = "running";
-
-  const main = document.createElement("div");
-  main.className = "job-main";
-
+function createLiveStatus(job) {
+  const el = document.createElement("div");
+  el.className = "hist-live";
   const line = document.createElement("div");
   line.className = "status-line";
   const spin = document.createElement("span");
   spin.className = "spinner";
   const statusText = document.createElement("span");
   statusText.className = "job-status";
-  statusText.textContent = "Submitting…";
+  statusText.textContent = "Starting…";
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button";
   cancelBtn.className = "job-cancel hidden";
   cancelBtn.textContent = "Cancel";
   line.append(spin, statusText, cancelBtn);
-
-  const taskIdEl = document.createElement("div");
-  taskIdEl.className = "task-id";
-
-  // Live progress bar (ComfyUI runs report sampler steps; hidden until we get one).
   const progressWrap = document.createElement("div");
   progressWrap.className = "job-progress hidden";
   const progressBar = document.createElement("div");
   progressBar.className = "job-progress-bar";
   progressWrap.appendChild(progressBar);
+  el.append(line, progressWrap);
 
-  main.append(line, taskIdEl, progressWrap);
-
-  const result = document.createElement("div");
-  result.className = "job-result hidden";
-
-  const dismiss = document.createElement("button");
-  dismiss.type = "button";
-  dismiss.className = "job-dismiss hidden";
-  dismiss.textContent = "×";
-  dismiss.title = "Dismiss";
-  dismiss.addEventListener("click", () => {
-    card.remove();
-    updateJobsChrome();
-  });
-
-  card.append(dismiss, main, result);
-  jobsEl.prepend(card); // newest on top
-  updateJobsChrome();
-
-  // Progress state for the live elapsed/ETA clock. `anchor` is the first tick of
-  // the current sampler pass; rate = steps since the anchor / time since it. A
-  // 1s ticker repaints the status line so elapsed advances between polls.
+  let baseStatus = "Generating…";
   let progInfo = null; // { value, max, anchorT, anchorValue }
-  let progStartedAt = null;
+  const progStartedAt = job.startedAt || Date.now();
   let progTicker = null;
-
-  const paintProgress = () => {
-    if (!progInfo) return;
+  const paint = () => {
+    if (!progInfo) { statusText.textContent = baseStatus; return; }
     const { value, max, anchorT, anchorValue } = progInfo;
     const now = Date.now();
     const pct = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
-    const elapsed = fmtDuration(now - (progStartedAt || now));
+    const elapsed = fmtDuration(now - progStartedAt);
     let eta = "";
     const dv = value - anchorValue;
     const dt = now - anchorT;
-    if (value < max && dv > 0 && dt > 0) {
-      eta = ` · ~${fmtDuration((max - value) * (dt / dv))} left`;
-    }
-    statusText.textContent = `Generating on ComfyUI… step ${value}/${max} (${pct}%) · ${elapsed} elapsed${eta}`;
-  };
-  const stopProgressClock = () => {
-    clearInterval(progTicker);
-    progTicker = null;
+    if (value < max && dv > 0 && dt > 0) eta = ` · ~${fmtDuration((max - value) * (dt / dv))} left`;
+    statusText.textContent = `${baseStatus} step ${value}/${max} (${pct}%) · ${elapsed} elapsed${eta}`;
   };
 
-  const api = {
-    el: card,
-    setStatus(text) {
-      statusText.textContent = text;
-    },
-    setTaskId(taskId) {
-      taskIdEl.textContent = `Task ID: ${taskId}`;
-    },
-    // Update the live progress bar + elapsed/ETA clock (0–100% from value/max).
+  return {
+    el,
+    running: true,
+    isComfy: (job.input?.model || "").startsWith("comfy:"),
+    setStatus(text) { baseStatus = text; paint(); },
     setProgress(value, max) {
       if (!max || max <= 0) return;
-      progStartedAt ??= job.startedAt || Date.now();
-      // New sampler pass (value reset) or first sighting → re-anchor the rate.
       if (!progInfo || value < progInfo.value) progInfo = { value, max, anchorT: Date.now(), anchorValue: value };
       else progInfo = { value, max, anchorT: progInfo.anchorT, anchorValue: progInfo.anchorValue };
-      const pct = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
-      progressBar.style.width = `${pct}%`;
+      progressBar.style.width = `${Math.max(0, Math.min(100, Math.round((value / max) * 100)))}%`;
       progressWrap.classList.remove("hidden");
-      paintProgress();
-      if (!progTicker) progTicker = setInterval(paintProgress, 1000);
+      paint();
+      if (!progTicker) progTicker = setInterval(paint, 1000);
     },
-    showResult(isImage, url, costText, preview = true) {
-      card.dataset.status = "done";
-      line.remove();
-      progressWrap.remove();
-      stopProgressClock();
-      const meta = document.createElement("p");
-      meta.className = "hist-meta";
-      meta.textContent = preview ? costText || "" : `Saved to History${costText ? ` · ${costText}` : ""}`;
-      const link = document.createElement("a");
-      link.className = "job-download";
-      link.href = url;
-      link.target = "_blank";
-      link.rel = "noopener";
-      link.textContent = isImage ? "Open image in new tab" : "Open video in new tab";
-      // Skip the inline player when "Generate preview" was off — just the link + meta.
-      if (preview) {
-        const media = document.createElement(isImage ? "img" : "video");
-        media.src = url;
-        if (!isImage) media.controls = true;
-        if (isImage) {
-          media.alt = "Generated image";
-          media.classList.add("zoomable"); // click to open full-size
-          media.addEventListener("click", () => openLightbox("image", url, "Generated image"));
-        }
-        result.append(media);
-      }
-      result.append(meta, link);
-      show(result);
-      dismiss.classList.remove("hidden");
-      updateJobsChrome();
-    },
-    fail(msg) {
-      card.dataset.status = "failed";
-      line.remove();
-      progressWrap.remove();
-      stopProgressClock();
-      const err = document.createElement("pre");
-      err.className = "job-error";
-      err.textContent = msg;
-      result.append(err);
-      show(result);
-      dismiss.classList.remove("hidden");
-      updateJobsChrome();
-    },
-    // Show a Cancel button while running; `fn` runs on click (once).
-    onCancel(fn) {
+    // Show a Cancel button; `fn` runs once on click.
+    enableCancel(fn) {
       cancelBtn.classList.remove("hidden");
       cancelBtn.addEventListener(
         "click",
-        async () => {
-          cancelBtn.disabled = true;
-          statusText.textContent = "Cancelling…";
-          await fn();
-        },
+        async () => { cancelBtn.disabled = true; statusText.textContent = "Cancelling…"; await fn(); },
         { once: true }
       );
     },
-    // Terminal "cancelled" state (distinct from a failure).
-    cancelled(msg) {
-      card.dataset.status = "cancelled";
-      line.remove();
-      progressWrap.remove();
-      stopProgressClock();
-      const note = document.createElement("p");
-      note.className = "job-note";
-      note.textContent = msg || "Cancelled.";
-      result.append(note);
-      show(result);
-      dismiss.classList.remove("hidden");
-      updateJobsChrome();
-    },
+    stop() { this.running = false; clearInterval(progTicker); progTicker = null; },
   };
-  return api;
 }
 
-// Wire the Cancel button on a ComfyUI job card: cancel the specific prompt on
-// ComfyUI (interrupt if running, drop from the queue if pending) without stopping
-// ComfyUI itself. The prompt is already in History, so it can be re-run.
-function wireComfyCancel(job, card) {
-  card.onCancel(async () => {
+const liveOf = (job) => (job.historyId ? liveStatus.get(job.historyId) : null);
+function finishLive(job) {
+  const l = liveOf(job);
+  if (l) { l.stop(); liveStatus.delete(job.historyId); }
+}
+// Persist a definitive failure/cancel to the pending History entry, then refresh.
+async function failJob(job, msg) {
+  finishLive(job);
+  if (job.historyId) {
+    try {
+      await fetch(`/api/history/${job.historyId}/fail`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: msg }),
+      });
+    } catch (err) {
+      console.error("Failed to mark history entry failed:", err);
+    }
+  }
+  loadHistory();
+}
+
+// Cancel a ComfyUI run (interrupt if running / drop from queue if pending) without
+// stopping ComfyUI. The prompt is in History, so it can be re-run.
+function wireComfyCancel(job) {
+  const live = liveOf(job);
+  if (!live) return;
+  live.enableCancel(async () => {
     job.cancelled = true;
     removeInflight(job.taskId);
     try {
@@ -2055,14 +2166,11 @@ function wireComfyCancel(job, card) {
     } catch (err) {
       console.error("Cancel failed:", err);
     }
-    card.cancelled("Cancelled. The prompt is saved in History — re-run it any time.");
+    await failJob(job, "Cancelled — re-run from History any time.");
   });
 }
 
 function collectInput(resolved) {
-  // UI-only flag (stripped server-side before the kie.ai call): whether to embed an
-  // inline preview on the finished card. Persisted on the input so History honors it.
-  const generatePreview = document.getElementById("generate_preview").checked;
   if (isSeedream()) {
     const input = {
       model: modelSelect.value,
@@ -2070,7 +2178,6 @@ function collectInput(resolved) {
       aspect_ratio: aspectSelect.value,
       quality: qualitySelect.value,
       nsfw_checker: document.getElementById("nsfw_checker").checked,
-      generatePreview,
     };
     if (isI2I()) input.image_urls = resolved.image;
     if (isSeedreamPro()) input.output_format = document.getElementById("output_format").value;
@@ -2088,7 +2195,6 @@ function collectInput(resolved) {
     duration: Number(document.getElementById("duration").value),
     web_search: document.getElementById("web_search").checked,
     nsfw_checker: document.getElementById("nsfw_checker").checked,
-    generatePreview,
   };
   // Start/end keyframes — all Seedance video models. `resolved` is already
   // mode-gated (empty unless the frames toggle is active), so these never coexist
@@ -2156,14 +2262,20 @@ form.addEventListener("submit", async (e) => {
     refSecs: isSeedream() ? 0 : refVideoSeconds(),
     startedAt: Date.now(),
   };
-  const card = createJobCard(job);
+
+  // Create the pending History entry up front (before the upload), so the run has a
+  // live card from the start. Its stored input has no hosted URLs yet — reference
+  // counts come from mediaLocalIds — and the real (resolved) input is sent to the API.
+  job.input = collectInput({ image: [], video: [], audio: [], firstFrame: [], lastFrame: [] });
+  job.historyId = await createHistoryEntry(job.input, null, job.mediaLocalIds, job.projectId, job.refSecs);
+  const live = createLiveStatus(job);
+  if (job.historyId) liveStatus.set(job.historyId, live);
+  loadHistory();
 
   // Host reference media on kie.ai now — nothing was sent when they were dropped.
   let resolved;
   try {
-    if (allItems().some((i) => i.status === "ready")) {
-      card.setStatus("Uploading reference media…");
-    }
+    if (allItems().some((i) => i.status === "ready")) live.setStatus("Uploading reference media…");
     resolved = {
       // only upload the reference kinds the selected model+mode actually uses
       // (2.5 forbids mixing reference images with first/last frames)
@@ -2174,13 +2286,13 @@ form.addEventListener("submit", async (e) => {
       lastFrame: usesFrames() ? await lists.lastFrame.resolve() : [],
     };
   } catch (err) {
-    card.fail(err.message || "Failed to upload reference media.");
+    await failJob(job, err.message || "Failed to upload reference media.");
     submitBtn.disabled = false;
     return;
   }
 
-  job.input = collectInput(resolved);
-  card.setStatus("Submitting…");
+  const genInput = collectInput(resolved); // real input (hosted URLs) for the API call
+  live.setStatus("Submitting…");
 
   // Snapshot the balance so we can measure actual cost on completion. (With
   // overlapping runs this delta is unreliable; the per-task creditsConsumed
@@ -2188,15 +2300,12 @@ form.addEventListener("submit", async (e) => {
   job.balanceBefore = await loadCredits();
 
   try {
-    job.taskId = await createTask(job.input, card);
-    card.setTaskId(job.taskId);
-    card.setStatus("Generating… this can take a few minutes.");
-    // Save the prompt/settings to History now so a failed run doesn't lose them.
-    job.historyId = await createHistoryEntry(job.input, job.taskId, job.mediaLocalIds, job.projectId, job.refSecs);
+    job.taskId = await createTask(genInput, live);
+    live.setStatus("Generating… this can take a few minutes.");
     addInflight(job);
-    pollJob(job, card);
+    pollJob(job);
   } catch (err) {
-    card.fail(err.message || String(err));
+    await failJob(job, err.message || String(err));
   } finally {
     submitBtn.disabled = false;
   }
@@ -2208,7 +2317,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // requests / 10s, and rejected requests are NOT queued, so we back off and retry.
 const RATE_LIMIT_RETRIES = 5;
 const RATE_LIMIT_BACKOFF_MS = 6000;
-async function createTask(input, card) {
+async function createTask(input, live) {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch("/api/create", {
       method: "POST",
@@ -2218,7 +2327,7 @@ async function createTask(input, card) {
     const data = await res.json().catch(() => ({}));
 
     if (res.status === 429 && attempt < RATE_LIMIT_RETRIES) {
-      card.setStatus(`Rate-limited — retrying (${attempt + 1}/${RATE_LIMIT_RETRIES})…`);
+      live.setStatus(`Rate-limited — retrying (${attempt + 1}/${RATE_LIMIT_RETRIES})…`);
       await sleep(RATE_LIMIT_BACKOFF_MS);
       continue;
     }
@@ -2229,62 +2338,51 @@ async function createTask(input, card) {
   }
 }
 
-async function pollJob(job, card) {
-  const { taskId, input, mediaLocalIds, balanceBefore, projectId, refSecs } = job;
+async function pollJob(job) {
+  const { taskId, balanceBefore } = job;
+  let data;
   try {
     const res = await fetch(`/api/status?taskId=${encodeURIComponent(taskId)}`);
-    const data = await res.json();
-
-    if (!res.ok || data.code !== 200) {
-      // 4xx means the task is gone/invalid — terminal, stop tracking it.
-      if (res.status >= 400 && res.status < 500) removeInflight(taskId);
-      throw new Error(data.msg || `Status check failed (${res.status})`);
-    }
-
-    const state = data.data?.state;
-
-    if (state === "success") {
+    data = await res.json();
+    if (res.status >= 400 && res.status < 500) {
+      // 4xx means the task is gone/invalid — terminal.
       removeInflight(taskId);
-      const parsed = JSON.parse(data.data.resultJson || "{}");
-      const url = parsed.resultUrls?.[0];
-      if (!url) throw new Error("Task succeeded but no result URL was returned.");
-
-      // Prefer the API's exact per-task cost (creditsConsumed on recordInfo);
-      // fall back to the balance delta for older responses (unreliable when
-      // runs overlap — see the submit-time note).
-      const balanceAfter = await loadCredits(); // also refreshes the header balance
-      let cost = null;
-      const reported = Number(data.data.creditsConsumed);
-      if (Number.isFinite(reported) && reported > 0) {
-        cost = reported;
-      } else if (typeof balanceBefore === "number" && typeof balanceAfter === "number") {
-        const delta = balanceBefore - balanceAfter;
-        if (delta > 0) cost = delta;
-      }
-
-      const localUrl = await attachHistoryResult(job, url, cost);
-      card.showResult(
-        isImageOutput(input?.model),
-        localUrl || url,
-        cost != null ? `Used ~${cost.toLocaleString()} credits` : "",
-        wantsPreview(job)
-      );
+      await failJob(job, data.msg || `Status check failed (${res.status})`);
       return;
     }
-
-    if (state === "fail") {
-      removeInflight(taskId);
-      throw new Error(
-        data.data?.failMsg || `Generation failed (code ${data.data?.failCode ?? "?"}).`
-      );
-    }
-
-    setTimeout(() => pollJob(job, card), POLL_INTERVAL_MS);
-  } catch (err) {
-    // Transient status-check errors keep the inflight record (a reload can
-    // resume it); terminal states already removed it above.
-    card.fail(err.message || String(err));
+    if (!res.ok || data.code !== 200) throw new Error(data.msg || `Status check failed (${res.status})`);
+  } catch {
+    // Transient (network / 5xx) — leave the entry pending and retry.
+    setTimeout(() => pollJob(job), POLL_INTERVAL_MS);
+    return;
   }
+
+  const state = data.data?.state;
+  if (state === "success") {
+    removeInflight(taskId);
+    finishLive(job);
+    const url = JSON.parse(data.data.resultJson || "{}").resultUrls?.[0];
+    if (!url) return failJob(job, "Task succeeded but no result URL was returned.");
+
+    // Prefer the API's exact per-task cost (creditsConsumed on recordInfo); fall
+    // back to the balance delta for older responses (unreliable when runs overlap).
+    const balanceAfter = await loadCredits(); // also refreshes the header balance
+    let cost = null;
+    const reported = Number(data.data.creditsConsumed);
+    if (Number.isFinite(reported) && reported > 0) cost = reported;
+    else if (typeof balanceBefore === "number" && typeof balanceAfter === "number") {
+      const delta = balanceBefore - balanceAfter;
+      if (delta > 0) cost = delta;
+    }
+    await attachHistoryResult(job, url, cost); // downloads, marks done, refreshes History
+    return;
+  }
+  if (state === "fail") {
+    removeInflight(taskId);
+    await failJob(job, data.data?.failMsg || `Generation failed (code ${data.data?.failCode ?? "?"}).`);
+    return;
+  }
+  setTimeout(() => pollJob(job), POLL_INTERVAL_MS);
 }
 
 // --- history -------------------------------------------------------------------
@@ -2481,25 +2579,25 @@ function renderHistory(entries) {
     const output = entry.localVideo || entry.resultUrl;
     const isImg = comfyEntry ? isImageFile(output) : isImageOutput(input.model);
     if (!output) {
-      // Pending entry (saved at submit time, no output yet) — or a run that
-      // failed/was cancelled before producing one. Prompt is preserved; Re-run works.
-      const ph = document.createElement("div");
-      ph.className = `hist-placeholder ${entry.status === "pending" ? "pending" : "unfinished"}`;
-      ph.textContent =
-        entry.status === "pending" ? "⏳ Generating…" : entry.error || "no output — re-run below";
-      if (entry.error) ph.title = entry.error;
-      card.appendChild(ph);
-    } else if (input.generatePreview === false) {
-      // Preview was skipped for this run — show a light click-to-open tile instead
-      // of auto-loading the media (that's the point of turning previews off).
-      const tile = document.createElement("button");
-      tile.type = "button";
-      tile.className = "hist-noprev";
-      tile.textContent = isImg ? "🖼 Open image" : "▶ Open video";
-      tile.title = "Preview was skipped for this run — click to open";
-      tile.addEventListener("click", () => openHistoryLightbox(entry));
-      card.appendChild(tile);
+      const live = entry.status === "pending" ? liveStatus.get(entry.id) : null;
+      if (live) {
+        // In-flight: show this run's live status/progress (+ Cancel) right here. The
+        // element is re-parented across re-renders so the poller's ref stays valid.
+        card.classList.add("hist-card-live");
+        card.appendChild(live.el);
+      } else {
+        // Pending with no live controller (e.g. before resume polls), or a run that
+        // failed/was cancelled. Prompt is preserved; Re-run works.
+        const ph = document.createElement("div");
+        ph.className = `hist-placeholder ${entry.status === "pending" ? "pending" : "unfinished"}`;
+        ph.textContent =
+          entry.status === "pending" ? "⏳ Generating…" : entry.error || "no output — re-run below";
+        if (entry.error) ph.title = entry.error;
+        card.appendChild(ph);
+      }
     } else {
+      // History always shows a thumbnail — a <video preload="metadata"> renders the
+      // first frame without downloading the whole file.
       if (isImg) {
         const im = document.createElement("img");
         im.src = output; // localVideo holds the saved output file
@@ -2527,10 +2625,13 @@ function renderHistory(entries) {
     const meta = document.createElement("div");
     meta.className = "hist-meta";
     const date = new Date(entry.createdAt).toLocaleString();
+    // Reference counts — fall back to mediaLocalIds (a pending entry's stored input
+    // has no hosted URLs yet).
+    const mli = entry.mediaLocalIds || {};
     const counts = [
-      [(input.reference_image_urls || input.image_urls || []).length, "img"],
-      [(input.reference_video_urls || []).length, "vid"],
-      [(input.reference_audio_urls || []).length, "aud"],
+      [(input.reference_image_urls || input.image_urls || mli.image || []).length, "img"],
+      [(input.reference_video_urls || mli.video || []).length, "vid"],
+      [(input.reference_audio_urls || mli.audio || []).length, "aud"],
     ]
       .filter(([n]) => n > 0)
       .map(([n, t]) => `${n} ${t}`)
@@ -2711,10 +2812,13 @@ async function applyEntry(entry) {
       return;
     }
     modelSelect.value = input.model;
-    applyModelUI(); // renders the workflow's controls with defaults
+    applyModelUI(); // kicks off the async control render (ComfyUI options + settings)
+    await comfyRenderPromise; // wait for the controls to exist before filling them
     prefillComfyControls(input.values || {});
+    if (comfyLoraControl && Array.isArray(input.loras)) comfyLoraControl.setLoras(input.loras);
+    if (comfyBypassControl && Array.isArray(input.bypass)) comfyBypassControl.setDisabled(input.bypass);
     await restoreComfyMedia(entry); // re-populate the image/video/audio fields
-    document.getElementById("generate_preview").checked = input.generatePreview !== false;
+    // "Generate preview" is a persisted global preference — re-import leaves it as-is.
     window.scrollTo({ top: 0, behavior: "smooth" });
     return;
   }
@@ -2738,7 +2842,7 @@ async function applyEntry(entry) {
   document.getElementById("web_search").checked = !!input.web_search;
   document.getElementById("nsfw_checker").checked = !!input.nsfw_checker;
   document.getElementById("return_last_frame").checked = !!input.return_last_frame;
-  document.getElementById("generate_preview").checked = input.generatePreview !== false;
+  // "Generate preview" is a persisted global preference — re-import leaves it as-is.
 
   const saved = await fetch("/api/images").then((r) => r.json()).then((d) => d.data || []);
   const localIds = entry.mediaLocalIds || { image: entry.imageLocalIds || [] };
@@ -2789,16 +2893,16 @@ function resumeInflight() {
       refSecs: pending.refSecs || 0,
       startedAt: pending.startedAt,
     };
-    const card = createJobCard(job);
-    card.setTaskId(job.taskId);
-    card.setStatus("Resuming previous generation… this can take a few minutes.");
+    const live = createLiveStatus(job);
+    live.setStatus("Resuming previous generation…");
+    if (job.historyId) liveStatus.set(job.historyId, live);
     // Route resumed jobs to the matching poller (ComfyUI vs kie.ai).
     const isComfyJob = (pending.input?.model || "").startsWith("comfy:");
-    if (isComfyJob) card.el.classList.add("comfy-job");
-    if (isComfyJob) wireComfyCancel(job, card);
-    if (isComfyJob) pollComfyJob(job, card);
-    else pollJob(job, card);
+    if (isComfyJob) wireComfyCancel(job);
+    if (isComfyJob) pollComfyJob(job);
+    else pollJob(job);
   }
+  loadHistory(); // render pending cards with their freshly-attached live status
 }
 
 // --- server-down banner ----------------------------------------------------------
@@ -2846,7 +2950,7 @@ function scheduleComfyStats(delay) {
 }
 
 async function comfyStatsTick() {
-  const running = document.querySelector('.comfy-job[data-status="running"]');
+  const running = [...liveStatus.values()].some((l) => l.isComfy && l.running);
   if (running || isComfy()) {
     try {
       const r = await fetch("/api/comfy/stats");
