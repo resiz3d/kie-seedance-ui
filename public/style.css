@@ -240,6 +240,14 @@ select:focus {
   border-color: var(--accent);
 }
 
+/* Prompt: tall by default (rows=20), and a min-height so it stays usably large
+   and drag-resizable on mobile browsers that honor `resize` (iOS Safari ignores
+   the resize grip, so the min-height is what guarantees a comfortable size there). */
+#prompt {
+  resize: vertical;
+  min-height: 8rem;
+}
+
 select option {
   background: var(--panel);
   color: var(--text);
@@ -308,6 +316,22 @@ section {
   word-break: break-all;
 }
 
+/* Live progress bar on a running ComfyUI job card. */
+.job-progress {
+  margin-top: 0.5rem;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.job-progress-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
 .spinner {
   width: 16px;
   height: 16px;
@@ -342,6 +366,19 @@ video,
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
+}
+
+/* Live host stats strip shown during local ComfyUI runs. */
+.comfy-stats {
+  margin-bottom: 0.6rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel, rgba(255, 255, 255, 0.02));
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
 }
 
 .job-card {
@@ -1012,3 +1049,94 @@ img.zoomable {
     width: 100%;
   }
 }
+
+/* --- ComfyUI (experimental local models) --- */
+.experimental-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #ffcf7a;
+  background: rgba(255, 176, 60, 0.12);
+  border: 1px solid rgba(255, 176, 60, 0.35);
+  border-radius: 999px;
+  vertical-align: middle;
+}
+.comfy-gallery {
+  margin-top: 8px;
+}
+.comfy-gallery summary {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* seed "control after generate" dropdown (ComfyUI local models) */
+.seed-after {
+  width: auto;
+  margin-left: auto;
+  padding: 2px 6px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* ComfyUI controls: a 12-column grid so tokens can declare a width hint
+   (e.g. "; 1/4"). Untagged controls, the prompt, and reference-file dropzones
+   span full width; the Model selector sits above the grid on its own line. */
+.comfy-grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.comfy-grid > * { grid-column: span 12; margin: 0; } /* default: own line */
+@media (max-width: 680px) {
+  .comfy-grid > * { grid-column: span 12 !important; } /* stack on narrow screens */
+}
+
+/* Job card: cancel button + cancelled/pending states */
+.job-cancel {
+  margin-left: auto;
+  padding: 3px 10px;
+  font-size: 0.8rem;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.job-cancel:hover { color: var(--error); border-color: var(--error); }
+.job-cancel:disabled { opacity: 0.5; cursor: default; }
+.job-note { color: var(--muted); font-size: 0.9rem; margin: 4px 0; }
+
+/* History placeholder for pending / unfinished (failed or cancelled) entries */
+.hist-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 90px;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.hist-placeholder.pending { border-style: solid; }
+
+/* Queue-count control next to Generate (local ComfyUI) */
+.queue-count {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 400;
+}
+.queue-count input { width: 3.4rem; padding: 0.4rem 0.5rem; }
+
+/* History delete button — danger hover */
+.hist-delete:hover:not(:disabled) { background: var(--error); border-color: var(--error); color: #fff; }

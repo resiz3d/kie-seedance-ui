@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, createHash, timingSafeEqual } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import os from "node:os";
 import "dotenv/config";
 
@@ -35,6 +35,13 @@ const HISTORY_FILE = path.join(__dirname, "history.json");
 const IMAGES_FILE = path.join(__dirname, "images.json");
 const PROJECTS_FILE = path.join(__dirname, "projects.json");
 
+// --- ComfyUI (optional local backend) -------------------------------------
+// Point at a running ComfyUI instance to run local workflows from the UI.
+// WORKFLOWS_DIR holds ComfyUI API-format .json exports, optionally tokenized
+// with {{name=default|opt|opt}} placeholders. See docs/COMFYUI.md.
+const COMFYUI_URL = (process.env.COMFYUI_URL || "http://127.0.0.1:8188").replace(/\/+$/, "");
+const WORKFLOWS_DIR = path.resolve(__dirname, process.env.WORKFLOWS_DIR || "workflows");
+
 if (!API_KEY) {
   console.error(
     "\n  Missing KIE_API_KEY. Copy .env.example to .env and add your key.\n" +
@@ -45,6 +52,7 @@ if (!API_KEY) {
 
 fs.mkdirSync(VIDEO_DIR, { recursive: true });
 fs.mkdirSync(IMAGES_DIR, { recursive: true });
+fs.mkdirSync(WORKFLOWS_DIR, { recursive: true });
 
 // --- json file helpers ----------------------------------------------------
 function readJson(file) {
@@ -381,6 +389,470 @@ app.get("/api/status", (req, res) => {
   );
 });
 
+// =========================================================================
+// ComfyUI: run local API-format workflows from the UI. Workflows live in
+// WORKFLOWS_DIR and may contain {{name=default|opt|opt}} tokens; the UI renders
+// a control per token and posts back {file, values}. We substitute, forward to
+// ComfyUI /prompt, and normalize /history polling into the same shape the
+// kie.ai path uses so the frontend job flow is shared.
+// =========================================================================
+
+// Parse a single token body (the text between {{ }}): "name", "name=default",
+// "name=default|opt1|opt2", plus optional trailing layout hints separated by ";":
+// a width ("; 1/4") and/or an order ("; #8"). Returns {name, default, options,
+// width, order}. Hints are layout-only and ignored when substituting values.
+const WIDTH_RE = /^(full|1|1\/2|1\/3|1\/4|2\/3|3\/4)$/;
+function parseTokenSpec(inner) {
+  inner = String(inner);
+  let width = null;
+  let order = null;
+  // Strip trailing "; <hint>" segments (a width like "1/4" and/or an order "#8").
+  for (;;) {
+    const semi = inner.lastIndexOf(";");
+    if (semi < 0) break;
+    const h = inner.slice(semi + 1).trim();
+    const orderMatch = h.match(/^#(\d+)$/);
+    if (WIDTH_RE.test(h)) width = h;
+    else if (orderMatch) order = Number(orderMatch[1]);
+    else break;
+    inner = inner.slice(0, semi);
+  }
+  const parts = inner.split("|");
+  const head = parts[0] || "";
+  const options = parts.slice(1).map((s) => s.trim()).filter((s) => s.length);
+  const eq = head.indexOf("=");
+  const name = (eq >= 0 ? head.slice(0, eq) : head).trim();
+  const def = eq >= 0 ? head.slice(eq + 1).trim() : "";
+  return { name, default: def, options, width, order };
+}
+
+// All distinct tokens in a workflow's raw text, first occurrence wins.
+function parseWorkflowTokens(text) {
+  const seen = new Map();
+  const re = /\{\{([\s\S]*?)\}\}/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const spec = parseTokenSpec(m[1]);
+    if (spec.name && !seen.has(spec.name)) seen.set(spec.name, spec);
+  }
+  return [...seen.values()];
+}
+
+// Replace tokens in a string. If the whole string is a single token, return the
+// raw value (preserving number/boolean type); otherwise interpolate as text.
+function resolveTokenString(str, values) {
+  const whole = str.match(/^\s*\{\{([\s\S]*)\}\}\s*$/);
+  if (whole) {
+    const spec = parseTokenSpec(whole[1]);
+    const v = values[spec.name];
+    return v !== undefined && v !== null ? v : spec.default;
+  }
+  return str.replace(/\{\{([\s\S]*?)\}\}/g, (_, inner) => {
+    const spec = parseTokenSpec(inner);
+    const v = values[spec.name];
+    return String(v !== undefined && v !== null ? v : spec.default);
+  });
+}
+
+// Deep-clone a parsed workflow, substituting tokens in every string leaf.
+function substituteWorkflow(node, values) {
+  if (typeof node === "string") return resolveTokenString(node, values);
+  if (Array.isArray(node)) return node.map((n) => substituteWorkflow(n, values));
+  if (node && typeof node === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(node)) out[k] = substituteWorkflow(v, values);
+    return out;
+  }
+  return node;
+}
+
+// Resolve a workflow filename to a path inside WORKFLOWS_DIR (no traversal).
+function workflowPath(file) {
+  if (!file || typeof file !== "string") return null;
+  const resolved = path.resolve(WORKFLOWS_DIR, file);
+  const base = path.resolve(WORKFLOWS_DIR);
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) return null;
+  if (!resolved.toLowerCase().endsWith(".json")) return null;
+  return resolved;
+}
+
+// List workflows + their tokens (so the UI can render controls).
+app.get("/api/workflows", (req, res) => {
+  let files = [];
+  try {
+    files = fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.toLowerCase().endsWith(".json"));
+  } catch {
+    /* dir missing — treated as empty */
+  }
+  const list = files.sort().map((file) => {
+    try {
+      const text = fs.readFileSync(path.join(WORKFLOWS_DIR, file), "utf8");
+      JSON.parse(text); // validate it's JSON (tokens are valid JSON strings)
+      return { file, name: file.replace(/\.json$/i, ""), tokens: parseWorkflowTokens(text) };
+    } catch (err) {
+      return { file, name: file.replace(/\.json$/i, ""), tokens: [], error: err.message };
+    }
+  });
+  res.json({ code: 200, msg: "success", data: list });
+});
+
+// Upload one image into ComfyUI's input folder; returns the LoadImage-ready name.
+// Source is either a base64 data URL or a saved gallery item `id` (so ComfyUI
+// inputs are the same locally-stored files the API side uses).
+app.post("/api/comfy/upload", async (req, res) => {
+  const { base64Data, fileName, id } = req.body || {};
+  let buf, name;
+  try {
+    if (id) {
+      const entry = readJson(IMAGES_FILE).find((i) => i.id === id);
+      if (!entry) return res.status(404).json({ code: 404, msg: "gallery item not found" });
+      buf = fs.readFileSync(path.join(IMAGES_DIR, entry.storedName));
+      name = entry.name || fileName || "image.png";
+    } else if (base64Data) {
+      buf = Buffer.from(String(base64Data).split(",").pop(), "base64");
+      name = fileName || "image.png";
+    } else {
+      return res.status(400).json({ code: 400, msg: "base64Data or id is required" });
+    }
+    const form = new FormData();
+    form.append("image", new Blob([buf]), name);
+    form.append("overwrite", "true");
+    const r = await fetch(`${COMFYUI_URL}/upload/image`, { method: "POST", body: form });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.name) {
+      return res.status(502).json({ code: 502, msg: "ComfyUI rejected the image upload" });
+    }
+    const ref = body.subfolder ? `${body.subfolder}/${body.name}` : body.name;
+    res.json({ code: 200, msg: "success", data: { filename: ref } });
+  } catch (err) {
+    console.error("ComfyUI upload error:", err);
+    res.status(502).json({ code: 502, msg: `Could not reach ComfyUI at ${COMFYUI_URL}` });
+  }
+});
+
+// True if any of a node's input strings contains a token with the given name.
+function nodeHasToken(node, name) {
+  for (const v of Object.values(node?.inputs || {})) {
+    if (typeof v !== "string") continue;
+    const re = /\{\{([\s\S]*?)\}\}/g;
+    let m;
+    while ((m = re.exec(v)) !== null) if (parseTokenSpec(m[1]).name === name) return true;
+  }
+  return false;
+}
+
+// Remove loader nodes whose (optional) media token was left empty, plus any
+// now-dangling `[nodeId, idx]` connections that referenced them. Lets a workflow
+// wire many reference slots while the user fills only the ones they have.
+function pruneWorkflow(workflow, pruneNames) {
+  if (!Array.isArray(pruneNames) || !pruneNames.length) return workflow;
+  const removed = new Set();
+  for (const name of pruneNames) {
+    for (const [id, node] of Object.entries(workflow)) {
+      if (nodeHasToken(node, name)) removed.add(id);
+    }
+  }
+  for (const id of removed) delete workflow[id];
+  for (const node of Object.values(workflow)) {
+    if (!node?.inputs) continue;
+    for (const [k, v] of Object.entries(node.inputs)) {
+      if (Array.isArray(v) && v.length === 2 && removed.has(String(v[0]))) delete node.inputs[k];
+    }
+  }
+  return workflow;
+}
+
+// --- ComfyUI errors → friendly text ------------------------------------------
+// Turn a /prompt validation rejection (node_errors) into readable lines instead
+// of dumping raw JSON on the job card. A missing model reads as e.g.
+// "CheckpointLoaderSimple (node 12): Value not in list — ckpt_name: 'x' not in […]".
+function formatComfyPromptError(body) {
+  const lines = [];
+  if (body?.error) {
+    const e = body.error;
+    const base = e.message || (typeof e === "string" ? e : "");
+    if (base) lines.push(e.details ? `${base}: ${e.details}` : base);
+  }
+  for (const [nodeId, info] of Object.entries(body?.node_errors || {})) {
+    const where = info.class_type ? `${info.class_type} (node ${nodeId})` : `node ${nodeId}`;
+    for (const e of info.errors || []) {
+      let detail = e.details || "";
+      if (detail.length > 300) detail = detail.slice(0, 297) + "…";
+      lines.push(detail ? `${where}: ${e.message} — ${detail}` : `${where}: ${e.message}`);
+    }
+  }
+  return lines.length ? lines.join("\n") : "ComfyUI rejected the workflow.";
+}
+
+// Turn a /history execution_error into a readable one-liner. Common failures
+// (out of VRAM, model mismatch, missing file) get a short plain-English headline
+// instead of the raw traceback message.
+function formatComfyExecError(entry) {
+  const m = (entry.status?.messages || []).find((x) => x[0] === "execution_error");
+  const info = m?.[1] || {};
+  const raw = info.exception_message || "";
+  const where = info.node_type ? `${info.node_type}: ` : "";
+  const hay = `${info.exception_type || ""} ${raw}`.toLowerCase();
+  if (hay.includes("out of memory") || hay.includes("outofmemory") || hay.includes("cuda oom")) {
+    return `${where}Out of VRAM — the GPU ran out of memory. Try a lower resolution, fewer frames/steps, or a lighter model.`;
+  }
+  if (hay.includes("error(s) in loading state_dict") || hay.includes("size mismatch")) {
+    return `${where}Model mismatch — a loaded checkpoint/LoRA doesn't fit this workflow's nodes.`;
+  }
+  if (hay.includes("no such file") || hay.includes("filenotfounderror") || hay.includes("cannot find")) {
+    return `${where}Missing file — a model or input the workflow needs isn't where ComfyUI expects it.`;
+  }
+  if (!raw) return "ComfyUI reported an execution error.";
+  return `${where}${raw}`;
+}
+
+// --- live progress via the ComfyUI websocket ---------------------------------
+// ComfyUI broadcasts run progress (sampler steps, etc.) over /ws. We keep one
+// connection and remember the latest {value,max} per prompt so /api/comfy/status
+// can report a % while a run is in flight. The socket is opened lazily when a run
+// is generated/polled, and the next poll reconnects it if it dropped.
+const COMFY_WS_URL = COMFYUI_URL.replace(/^http/i, "ws") + "/ws?clientId=kie-seedance-ui";
+let comfyWs = null;
+let comfyWsConnecting = false;
+let comfyCurrentPrompt = null;
+const comfyProgress = new Map(); // promptId -> { value, max, updatedAt }
+
+function ensureComfyWs() {
+  if (comfyWs || comfyWsConnecting) return;
+  comfyWsConnecting = true;
+  let ws;
+  try {
+    ws = new WebSocket(COMFY_WS_URL);
+  } catch {
+    comfyWsConnecting = false;
+    return;
+  }
+  const drop = () => {
+    if (comfyWs === ws) comfyWs = null;
+    comfyWsConnecting = false;
+  };
+  ws.addEventListener("open", () => { comfyWs = ws; comfyWsConnecting = false; });
+  ws.addEventListener("close", drop);
+  ws.addEventListener("error", drop);
+  ws.addEventListener("message", (ev) => {
+    if (typeof ev.data !== "string") return; // ignore binary preview frames
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    const { type, data } = msg || {};
+    if (type === "execution_start" || type === "executing") {
+      if (data?.prompt_id) comfyCurrentPrompt = data.prompt_id;
+    } else if (type === "progress") {
+      const pid = data?.prompt_id || comfyCurrentPrompt;
+      if (pid && Number.isFinite(data?.value) && Number.isFinite(data?.max)) {
+        comfyProgress.set(pid, { value: data.value, max: data.max, updatedAt: Date.now() });
+      }
+    } else if (
+      type === "executed" ||
+      type === "execution_success" ||
+      type === "execution_error" ||
+      type === "execution_interrupted"
+    ) {
+      if (data?.prompt_id) comfyProgress.delete(data.prompt_id);
+    }
+  });
+}
+
+// Drop progress we haven't heard about in 10 min (finished/abandoned prompts).
+function pruneComfyProgress() {
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const [pid, p] of comfyProgress) if (p.updatedAt < cutoff) comfyProgress.delete(pid);
+}
+
+// --- system stats (CPU / GPU / VRAM) -----------------------------------------
+// CPU % is derived from host cpu-time deltas between calls (non-blocking). GPU
+// utilization + VRAM come from `nvidia-smi` when present; if it isn't (no NVIDIA
+// GPU / not on PATH), VRAM falls back to ComfyUI's /system_stats and GPU % is null.
+function cpuSnapshot() {
+  let idle = 0;
+  let total = 0;
+  for (const c of os.cpus()) {
+    for (const t of Object.values(c.times)) total += t;
+    idle += c.times.idle;
+  }
+  return { idle, total };
+}
+let lastCpuSnap = null;
+function cpuPercent() {
+  const now = cpuSnapshot();
+  const prev = lastCpuSnap;
+  lastCpuSnap = now;
+  if (!prev) return null; // need two samples; first call primes it
+  const idleD = now.idle - prev.idle;
+  const totalD = now.total - prev.total;
+  if (totalD <= 0) return null;
+  return Math.max(0, Math.min(100, Math.round((1 - idleD / totalD) * 100)));
+}
+
+let nvidiaSmiMissing = false; // stop shelling out once we know it's not there
+function nvidiaSmi() {
+  if (nvidiaSmiMissing) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile(
+      "nvidia-smi",
+      ["--query-gpu=utilization.gpu,memory.used,memory.total,name", "--format=csv,noheader,nounits"],
+      { timeout: 2500, windowsHide: true },
+      (err, stdout) => {
+        if (err) {
+          if (err.code === "ENOENT") nvidiaSmiMissing = true;
+          return resolve(null);
+        }
+        const gpus = stdout
+          .trim()
+          .split("\n")
+          .map((line) => {
+            const [util, memUsed, memTotal, ...name] = line.split(",").map((s) => s.trim());
+            return { util: Number(util), memUsed: Number(memUsed), memTotal: Number(memTotal), name: name.join(",") };
+          })
+          .filter((g) => Number.isFinite(g.util) && Number.isFinite(g.memTotal) && g.memTotal > 0);
+        resolve(gpus.length ? gpus : null);
+      }
+    );
+  });
+}
+
+// VRAM (in MiB) from ComfyUI when nvidia-smi is unavailable.
+async function comfyVram() {
+  try {
+    const r = await fetch(`${COMFYUI_URL}/system_stats`);
+    const s = await r.json();
+    const dev = (s.devices || []).find((d) => d.type !== "cpu" && d.vram_total) || (s.devices || [])[0];
+    if (!dev || !dev.vram_total) return null;
+    const used = dev.vram_total - (dev.vram_free ?? 0);
+    return {
+      used: Math.round(used / 1048576),
+      total: Math.round(dev.vram_total / 1048576),
+      pct: Math.round((used / dev.vram_total) * 100),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Substitute a workflow's tokens and queue it on ComfyUI. Returns a promptId.
+app.post("/api/comfy/generate", async (req, res) => {
+  ensureComfyWs(); // start listening for progress before the run begins
+  const { file, values, prune } = req.body || {};
+  const wfPath = workflowPath(file);
+  if (!wfPath || !fs.existsSync(wfPath)) {
+    return res.status(400).json({ code: 400, msg: "Unknown workflow file" });
+  }
+  let workflow;
+  try {
+    workflow = JSON.parse(fs.readFileSync(wfPath, "utf8"));
+    workflow = pruneWorkflow(workflow, prune); // drop empty optional reference loaders
+    workflow = substituteWorkflow(workflow, values || {});
+  } catch (err) {
+    return res.status(400).json({ code: 400, msg: `Workflow is not valid JSON: ${err.message}` });
+  }
+  try {
+    const r = await fetch(`${COMFYUI_URL}/prompt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: workflow }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || !body.prompt_id) {
+      return res.status(r.status || 502).json({ code: r.status || 502, msg: formatComfyPromptError(body) });
+    }
+    res.json({ code: 200, msg: "success", data: { promptId: body.prompt_id } });
+  } catch (err) {
+    console.error("ComfyUI generate error:", err);
+    res.status(502).json({ code: 502, msg: `Could not reach ComfyUI at ${COMFYUI_URL}` });
+  }
+});
+
+// Poll a ComfyUI job; normalize to the kie.ai status shape the frontend expects.
+app.get("/api/comfy/status", async (req, res) => {
+  const promptId = req.query.promptId;
+  if (!promptId) return res.status(400).json({ code: 400, msg: "promptId is required" });
+  ensureComfyWs(); // keep the progress socket alive while a run is polled
+  pruneComfyProgress();
+  const prog = comfyProgress.get(promptId);
+  const progress = prog ? { value: prog.value, max: prog.max } : undefined;
+  try {
+    const r = await fetch(`${COMFYUI_URL}/history/${encodeURIComponent(promptId)}`);
+    const hist = await r.json().catch(() => ({}));
+    const entry = hist?.[promptId];
+    if (!entry) return res.json({ code: 200, msg: "success", data: { state: "waiting", progress } });
+
+    const statusStr = entry.status?.status_str;
+    if (statusStr === "error") {
+      comfyProgress.delete(promptId);
+      return res.json({ code: 200, msg: "success", data: { state: "fail", failMsg: formatComfyExecError(entry) } });
+    }
+
+    // Collect output files; prefer video/animation over still images.
+    const urls = [];
+    for (const out of Object.values(entry.outputs || {})) {
+      for (const key of ["videos", "gifs", "images"]) {
+        for (const f of out[key] || []) {
+          urls.push(
+            `${COMFYUI_URL}/view?filename=${encodeURIComponent(f.filename)}` +
+              `&subfolder=${encodeURIComponent(f.subfolder || "")}&type=${encodeURIComponent(f.type || "output")}`
+          );
+        }
+      }
+    }
+    if (!urls.length) return res.json({ code: 200, msg: "success", data: { state: "waiting", progress } });
+    res.json({
+      code: 200,
+      msg: "success",
+      data: { state: "success", resultJson: JSON.stringify({ resultUrls: urls }) },
+    });
+  } catch (err) {
+    console.error("ComfyUI status error:", err);
+    res.status(502).json({ code: 502, msg: `Could not reach ComfyUI at ${COMFYUI_URL}` });
+  }
+});
+
+// Cancel one ComfyUI job without stopping ComfyUI: drop it from the queue if it's
+// still pending, or interrupt it if it's the one currently running.
+app.post("/api/comfy/cancel", async (req, res) => {
+  const promptId = req.body?.promptId;
+  if (!promptId) return res.status(400).json({ code: 400, msg: "promptId is required" });
+  try {
+    const queue = await fetch(`${COMFYUI_URL}/queue`).then((r) => r.json()).catch(() => ({}));
+    const inList = (list) => (list || []).some((item) => item[1] === promptId);
+    const running = inList(queue.queue_running);
+    const pending = inList(queue.queue_pending);
+    if (pending) {
+      await fetch(`${COMFYUI_URL}/queue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delete: [promptId] }),
+      });
+    }
+    if (running) await fetch(`${COMFYUI_URL}/interrupt`, { method: "POST" });
+    res.json({ code: 200, msg: "cancelled", data: { running, pending } });
+  } catch (err) {
+    console.error("ComfyUI cancel error:", err);
+    res.status(502).json({ code: 502, msg: `Could not reach ComfyUI at ${COMFYUI_URL}` });
+  }
+});
+
+// Host CPU % + GPU util % + VRAM usage, for the live readout during local runs.
+app.get("/api/comfy/stats", async (req, res) => {
+  const cpu = cpuPercent();
+  const ramTotal = os.totalmem();
+  const ram = Math.round((1 - os.freemem() / ramTotal) * 100);
+  let gpu = null;
+  let vram = null;
+  const gpus = await nvidiaSmi();
+  if (gpus) {
+    const g = gpus[0]; // primary GPU
+    gpu = g.util;
+    vram = { used: g.memUsed, total: g.memTotal, pct: Math.round((g.memUsed / g.memTotal) * 100) };
+  } else {
+    vram = await comfyVram(); // GPU % unavailable without nvidia-smi
+  }
+  res.json({ code: 200, msg: "success", data: { cpu, gpu, vram, ram } });
+});
+
 // --- open the output folder in the OS file explorer -----------------------
 // Only ever opens VIDEO_DIR or one of its project subfolders — no arbitrary paths.
 app.post("/api/open-folder", (req, res) => {
@@ -608,7 +1080,10 @@ app.post("/api/export", (req, res) => {
       const rel = entry.localVideo.slice("/video/".length);
       const ext = path.extname(rel) || "";
       const href = copyInto(path.join(VIDEO_DIR, rel), "output", `${entry.id}${ext}`);
-      if (href) output = { kind: isImageOutputModel(entry.input?.model) ? "image" : "video", src: href };
+      // Kind from the model, or from the file extension (ComfyUI outputs aren't
+      // typed by the model id and may be images or video).
+      const isImg = isImageOutputModel(entry.input?.model) || /\.(png|jpe?g|webp|gif|bmp)$/i.test(rel);
+      if (href) output = { kind: isImg ? "image" : "video", src: href };
     }
     return { entry, inputs, output };
   });
@@ -827,6 +1302,52 @@ app.delete("/api/images/:id", (req, res) => {
   res.json({ code: 200, msg: "deleted" });
 });
 
+// Download a finished result into a project's video folder; returns the served
+// /video/... path, or null on failure.
+async function downloadOutput(resultUrl, proj, id) {
+  try {
+    const r = await fetch(resultUrl);
+    if (!r.ok) return null;
+    // Extension from the path, or from a ?filename= query (ComfyUI /view uses that).
+    let fnameHint = resultUrl.split("?")[0];
+    try {
+      const q = new URL(resultUrl, "http://localhost").searchParams.get("filename");
+      if (q) fnameHint = q;
+    } catch {
+      /* non-URL resultUrl — fall back to the path */
+    }
+    const ext = (fnameHint.match(/\.(\w+)$/)?.[1] || "mp4").toLowerCase();
+    const fileName = `${id}.${ext}`;
+    const buf = Buffer.from(await r.arrayBuffer());
+    fs.mkdirSync(path.join(VIDEO_DIR, proj.slug), { recursive: true });
+    fs.writeFileSync(path.join(VIDEO_DIR, proj.slug, fileName), buf);
+    return `/video/${proj.slug}/${fileName}`;
+  } catch (err) {
+    console.error("Failed to download output:", err);
+    return null;
+  }
+}
+
+// Build a history entry object (output fields may be null for a pending entry).
+function makeHistoryEntry({ id, taskId, projectId, input, resultUrl, localVideo, costCredits, refVideoSeconds, imageLocalIds, mediaLocalIds, status }) {
+  return {
+    id,
+    createdAt: new Date().toISOString(),
+    taskId: taskId || null,
+    projectId,
+    input: input || {},
+    resultUrl: resultUrl || null,
+    localVideo: localVideo || null,
+    costCredits: typeof costCredits === "number" ? costCredits : null,
+    status: status || "done",
+    // total seconds of reference video inputs (video refs bill by combined duration)
+    refVideoSeconds: typeof refVideoSeconds === "number" ? refVideoSeconds : 0,
+    imageLocalIds: Array.isArray(imageLocalIds) ? imageLocalIds : [],
+    // per-kind local ids: { image: [], video: [], audio: [] }
+    mediaLocalIds: mediaLocalIds && typeof mediaLocalIds === "object" ? mediaLocalIds : null,
+  };
+}
+
 // --- save a finished generation to history (+ download the video) -------
 app.post("/api/save", async (req, res) => {
   const { input, taskId, resultUrl, costCredits, imageLocalIds, mediaLocalIds, projectId, refVideoSeconds } =
@@ -835,43 +1356,47 @@ app.post("/api/save", async (req, res) => {
 
   const proj = resolveProject(projectId);
   const id = `${Date.now()}`;
-  let localVideo = null;
-
-  try {
-    const r = await fetch(resultUrl);
-    if (r.ok) {
-      const ext = (resultUrl.split("?")[0].match(/\.(\w+)$/)?.[1] || "mp4").toLowerCase();
-      const fileName = `${id}.${ext}`;
-      const buf = Buffer.from(await r.arrayBuffer());
-      fs.mkdirSync(path.join(VIDEO_DIR, proj.slug), { recursive: true });
-      fs.writeFileSync(path.join(VIDEO_DIR, proj.slug, fileName), buf);
-      localVideo = `/video/${proj.slug}/${fileName}`;
-    }
-  } catch (err) {
-    console.error("Failed to download video:", err);
-  }
-
-  const entry = {
-    id,
-    createdAt: new Date().toISOString(),
-    taskId: taskId || null,
-    projectId: proj.id,
-    input: input || {},
-    resultUrl,
-    localVideo,
-    costCredits: typeof costCredits === "number" ? costCredits : null,
-    // total seconds of reference video inputs (video refs bill by combined duration)
-    refVideoSeconds: typeof refVideoSeconds === "number" ? refVideoSeconds : 0,
-    imageLocalIds: Array.isArray(imageLocalIds) ? imageLocalIds : [],
-    // per-kind local ids: { image: [], video: [], audio: [] }
-    mediaLocalIds: mediaLocalIds && typeof mediaLocalIds === "object" ? mediaLocalIds : null,
-  };
-
+  const localVideo = await downloadOutput(resultUrl, proj, id);
+  const entry = makeHistoryEntry({
+    id, taskId, projectId: proj.id, input, resultUrl, localVideo, costCredits, refVideoSeconds, imageLocalIds, mediaLocalIds,
+  });
   const entries = readJson(HISTORY_FILE);
   entries.unshift(entry);
   writeJson(HISTORY_FILE, entries);
-
   res.json({ code: 200, msg: "saved", data: entry });
+});
+
+// --- create a PENDING history entry at submit time (prompt saved immediately,
+// before the generation succeeds, so a failed/stopped run doesn't lose it) ----
+app.post("/api/history", (req, res) => {
+  const { input, taskId, mediaLocalIds, projectId, refVideoSeconds, imageLocalIds } = req.body || {};
+  const proj = resolveProject(projectId);
+  const entry = makeHistoryEntry({
+    id: `${Date.now()}`, taskId, projectId: proj.id, input, mediaLocalIds, refVideoSeconds, imageLocalIds,
+    status: "pending",
+  });
+  const entries = readJson(HISTORY_FILE);
+  entries.unshift(entry);
+  writeJson(HISTORY_FILE, entries);
+  res.json({ code: 200, msg: "created", data: entry });
+});
+
+// --- attach the finished output to a pending entry (downloads the file) -------
+app.post("/api/history/:id/result", async (req, res) => {
+  const { resultUrl, costCredits } = req.body || {};
+  const entries = readJson(HISTORY_FILE);
+  const entry = entries.find((e) => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ code: 404, msg: "history entry not found" });
+
+  if (resultUrl) {
+    entry.resultUrl = resultUrl;
+    const localVideo = await downloadOutput(resultUrl, resolveProject(entry.projectId), entry.id);
+    if (localVideo) entry.localVideo = localVideo;
+  }
+  if (typeof costCredits === "number") entry.costCredits = costCredits;
+  entry.status = "done";
+  writeJson(HISTORY_FILE, entries);
+  res.json({ code: 200, msg: "updated", data: entry });
 });
 
 app.get("/api/history", (req, res) => {
@@ -900,6 +1425,27 @@ app.put("/api/history/:id", (req, res) => {
     writeJson(HISTORY_FILE, entries);
   }
   res.json({ code: 200, msg: "updated", data: entry });
+});
+
+// --- delete a history entry (and its saved output file) -------------------
+app.delete("/api/history/:id", (req, res) => {
+  const entries = readJson(HISTORY_FILE);
+  const idx = entries.findIndex((e) => e.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ code: 404, msg: "history entry not found" });
+
+  const entry = entries[idx];
+  // Best-effort removal of the saved output file (input gallery media is shared,
+  // so it's left alone).
+  if (entry.localVideo?.startsWith("/video/")) {
+    try {
+      fs.unlinkSync(path.join(VIDEO_DIR, entry.localVideo.slice("/video/".length)));
+    } catch (err) {
+      if (err.code !== "ENOENT") console.error("Failed to delete output file:", err.message);
+    }
+  }
+  entries.splice(idx, 1);
+  writeJson(HISTORY_FILE, entries);
+  res.json({ code: 200, msg: "deleted" });
 });
 
 // extension → mime for adding a generated output into the gallery

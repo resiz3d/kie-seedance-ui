@@ -55,14 +55,17 @@
           </select>
         </label>
 
-        <div class="field">
+        <!-- ComfyUI: controls generated from the selected workflow's {{tokens}} -->
+        <div id="comfyControls" class="hidden"></div>
+
+        <div class="field" id="promptField">
           <div class="field-head">
             <span>Prompt <span class="hint" id="promptCapHint"></span></span>
             <span class="char-count" id="promptCount"></span>
           </div>
           <textarea
             id="prompt"
-            rows="4"
+            rows="20"
             placeholder="Describe the video you want to generate. Reference images with @Image1, @Image2, etc."
           ></textarea>
         </div>
@@ -147,7 +150,7 @@
           <div id="gallery" class="thumbs gallery"></div>
         </details>
 
-        <div class="row">
+        <div class="row" id="optionsRow">
           <label id="resolutionField">
             Resolution
             <select id="resolution">
@@ -192,7 +195,7 @@
           </label>
         </div>
 
-        <div class="checks">
+        <div class="checks" id="checksRow">
           <label class="inline" id="genAudioField">
             <input id="generate_audio" type="checkbox" checked /> Generate audio
           </label>
@@ -209,6 +212,9 @@
 
         <div class="submit-row">
           <button type="submit" id="submitBtn">Generate</button>
+          <label class="queue-count hidden" id="comfyCountField" title="Queue this many generations">
+            ×<input id="comfyCount" type="number" min="1" max="20" step="1" value="1" />
+          </label>
           <span class="estimate" id="estimate"></span>
         </div>
       </form>
@@ -217,6 +223,9 @@
       <div id="jobsHeader" class="jobs-header hidden">
         <button type="button" id="closeAllJobs" class="btn-secondary">Close All</button>
       </div>
+
+      <!-- Live host stats while a local ComfyUI run is in flight. -->
+      <div id="comfyStats" class="comfy-stats hidden" title="Host CPU / GPU utilization and VRAM usage"></div>
       <section id="jobs" class="jobs hidden"></section>
 
       <pre id="error" class="hidden"></pre>

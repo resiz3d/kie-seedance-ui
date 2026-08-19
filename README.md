@@ -13,6 +13,14 @@ prompt + reference media, then polls until the video is ready.
 
 ![Screenshot of the Seedance app](screenshot.png)
 
+> **API reference:** local copies of the kie.ai model docs (parameters per model,
+> shared endpoints, and known discrepancies) live in
+> [`docs/kie-api/`](docs/kie-api/README.md) so you don't have to re-check the web.
+>
+> **Local ComfyUI:** you can also run local ComfyUI workflows from the same UI —
+> drop tokenized `.json` workflows in `workflows/` and pick them from the Model
+> dropdown. See [`docs/COMFYUI.md`](docs/COMFYUI.md).
+
 ## Features
 
 - **Drag-and-drop reference media** — images, videos, and audio each have a
