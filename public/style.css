@@ -850,6 +850,24 @@ img.zoomable {
   border-radius: 8px;
 }
 
+/* Click-to-open tile shown when a run was made with "Generate preview" off. */
+.hist-noprev {
+  width: 140px;
+  flex-shrink: 0;
+  min-height: 90px;
+  align-self: flex-start;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.hist-noprev:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 .hist-body {
   flex: 1;
   min-width: 0;

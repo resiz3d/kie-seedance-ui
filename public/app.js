@@ -1680,7 +1680,12 @@ async function submitComfy() {
           if (localId) mediaIds[f.mediaKind]?.push(localId);
         }
       }
-      const input = { model: `comfy:${wf.file}`, workflow: wf.name, values };
+      const input = {
+        model: `comfy:${wf.file}`,
+        workflow: wf.name,
+        values,
+        generatePreview: document.getElementById("generate_preview").checked,
+      };
       if (typeof values.prompt === "string" && values.prompt.trim()) input.prompt = values.prompt.trim();
       await queueComfyRun(wf, values, prune, mediaIds, input);
       // Advance seeds for the next queued run (no-op when the mode is "fixed").
@@ -1707,21 +1712,31 @@ async function queueComfyRun(wf, values, prune, mediaIds, input) {
   card.el.classList.add("comfy-job"); // marks local runs for the host-stats readout
   try {
     card.setStatus("Queueing on ComfyUI…");
+    // One request queues the run AND creates the pending History entry server-side,
+    // so a dropped connection right after (common on mobile) can't orphan the run —
+    // the server-side sweep still finishes it.
     const res = await fetch("/api/comfy/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: wf.file, values, prune }),
+      body: JSON.stringify({
+        file: wf.file,
+        values,
+        prune,
+        input: job.input,
+        mediaLocalIds: job.mediaLocalIds,
+        projectId: job.projectId,
+        refVideoSeconds: 0,
+      }),
     });
     const data = await res.json();
     if (!res.ok || data.code !== 200 || !data.data?.promptId) {
       throw new Error(data.msg || "ComfyUI rejected the workflow.");
     }
     job.taskId = data.data.promptId;
+    job.historyId = data.data.historyId || null;
     card.setTaskId(job.taskId);
     card.setStatus("Generating on ComfyUI… this can take a while.");
-    // Save the prompt/settings to History now — before it finishes — so a failed
-    // or cancelled run doesn't lose them.
-    job.historyId = await createHistoryEntry(job.input, job.taskId, job.mediaLocalIds, job.projectId, 0);
+    loadHistory(); // show the server-created pending entry
     addInflight(job);
     wireComfyCancel(job, card);
     pollComfyJob(job, card);
@@ -1746,14 +1761,31 @@ async function pollComfyJob(job, card) {
       removeInflight(job.taskId);
       const url = JSON.parse(data.data.resultJson || "{}").resultUrls?.[0];
       if (!url) throw new Error("Finished, but ComfyUI returned no output file.");
-      const isImg = /\.(png|jpe?g|webp|gif|bmp)(\?|$)/i.test(url);
-      card.showResult(isImg, url, ""); // local model — no credit cost
-      attachHistoryResult(job, url, null);
+      // Preview the downloaded local copy (ComfyUI's /view URL renders blank inline).
+      const localUrl = await attachHistoryResult(job, url, null);
+      const preview = localUrl || url;
+      card.showResult(isImageFile(preview), preview, "", wantsPreview(job)); // local model — no credit cost
       return;
     }
     if (state === "fail") {
       removeInflight(job.taskId);
+      loadHistory(); // the server sweep marks the entry failed too; refresh to match
       throw new Error(data.data?.failMsg || "ComfyUI generation failed.");
+    }
+    if (state === "lost") {
+      // ComfyUI has no record of this prompt (usually it was restarted). Allow a
+      // couple polls of grace for the brief submit→queue race, then stop spinning.
+      job.lostCount = (job.lostCount || 0) + 1;
+      if (job.lostCount < 3) {
+        setTimeout(() => pollComfyJob(job, card), POLL_INTERVAL_MS);
+        return;
+      }
+      removeInflight(job.taskId);
+      loadHistory(); // the server sweep flips the entry off "Generating…"; refresh
+      throw new Error(
+        "ComfyUI has no record of this run — it was likely restarted. If its output is in " +
+          "ComfyUI's output folder it couldn't be copied automatically; re-run to regenerate."
+      );
     }
     // Still running — surface live step progress if ComfyUI reported any (this
     // also drives the elapsed/ETA clock on the card).
@@ -1818,6 +1850,12 @@ closeAllJobsBtn.addEventListener("click", () => {
   for (const card of terminalCards()) card.remove();
   updateJobsChrome();
 });
+
+// Whether to embed an inline media preview on the finished job card. Off when the
+// run was submitted with "Generate preview" unchecked (persisted on the input).
+function wantsPreview(job) {
+  return job?.input?.generatePreview !== false;
+}
 
 // Human-readable elapsed/ETA, e.g. "8s", "2m 05s", "1h 03m".
 function fmtDuration(ms) {
@@ -1926,29 +1964,33 @@ function createJobCard(job) {
       paintProgress();
       if (!progTicker) progTicker = setInterval(paintProgress, 1000);
     },
-    showResult(isImage, url, costText) {
+    showResult(isImage, url, costText, preview = true) {
       card.dataset.status = "done";
       line.remove();
       progressWrap.remove();
       stopProgressClock();
-      const media = document.createElement(isImage ? "img" : "video");
-      media.src = url;
-      if (!isImage) media.controls = true;
-      if (isImage) {
-        media.alt = "Generated image";
-        media.classList.add("zoomable"); // click to open full-size
-        media.addEventListener("click", () => openLightbox("image", url, "Generated image"));
-      }
       const meta = document.createElement("p");
       meta.className = "hist-meta";
-      meta.textContent = costText || "";
+      meta.textContent = preview ? costText || "" : `Saved to History${costText ? ` · ${costText}` : ""}`;
       const link = document.createElement("a");
       link.className = "job-download";
       link.href = url;
       link.target = "_blank";
       link.rel = "noopener";
-      link.textContent = "Open result in new tab";
-      result.append(media, meta, link);
+      link.textContent = isImage ? "Open image in new tab" : "Open video in new tab";
+      // Skip the inline player when "Generate preview" was off — just the link + meta.
+      if (preview) {
+        const media = document.createElement(isImage ? "img" : "video");
+        media.src = url;
+        if (!isImage) media.controls = true;
+        if (isImage) {
+          media.alt = "Generated image";
+          media.classList.add("zoomable"); // click to open full-size
+          media.addEventListener("click", () => openLightbox("image", url, "Generated image"));
+        }
+        result.append(media);
+      }
+      result.append(meta, link);
       show(result);
       dismiss.classList.remove("hidden");
       updateJobsChrome();
@@ -2018,6 +2060,9 @@ function wireComfyCancel(job, card) {
 }
 
 function collectInput(resolved) {
+  // UI-only flag (stripped server-side before the kie.ai call): whether to embed an
+  // inline preview on the finished card. Persisted on the input so History honors it.
+  const generatePreview = document.getElementById("generate_preview").checked;
   if (isSeedream()) {
     const input = {
       model: modelSelect.value,
@@ -2025,6 +2070,7 @@ function collectInput(resolved) {
       aspect_ratio: aspectSelect.value,
       quality: qualitySelect.value,
       nsfw_checker: document.getElementById("nsfw_checker").checked,
+      generatePreview,
     };
     if (isI2I()) input.image_urls = resolved.image;
     if (isSeedreamPro()) input.output_format = document.getElementById("output_format").value;
@@ -2042,6 +2088,7 @@ function collectInput(resolved) {
     duration: Number(document.getElementById("duration").value),
     web_search: document.getElementById("web_search").checked,
     nsfw_checker: document.getElementById("nsfw_checker").checked,
+    generatePreview,
   };
   // Start/end keyframes — all Seedance video models. `resolved` is already
   // mode-gated (empty unless the frames toggle is active), so these never coexist
@@ -2215,12 +2262,13 @@ async function pollJob(job, card) {
         if (delta > 0) cost = delta;
       }
 
+      const localUrl = await attachHistoryResult(job, url, cost);
       card.showResult(
         isImageOutput(input?.model),
-        url,
-        cost != null ? `Used ~${cost.toLocaleString()} credits` : ""
+        localUrl || url,
+        cost != null ? `Used ~${cost.toLocaleString()} credits` : "",
+        wantsPreview(job)
       );
-      attachHistoryResult(job, url, cost);
       return;
     }
 
@@ -2269,16 +2317,21 @@ async function createHistoryEntry(input, taskId, mediaLocalIds, projectId, refSe
 // Attach the finished output to a pending entry (downloads the file). Falls back
 // to a fresh save if there's no pending id (e.g. a job resumed from a reload
 // predating the pending entry).
+// Returns the saved local file path (/video/…) so callers can preview the
+// downloaded copy instead of the source URL (ComfyUI's /view URL doesn't render a
+// reliable inline poster; the local file does).
 async function attachHistoryResult(job, resultUrl, costCredits) {
   try {
+    let entry = null;
     if (job.historyId) {
-      await fetch(`/api/history/${job.historyId}/result`, {
+      const r = await fetch(`/api/history/${job.historyId}/result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resultUrl, costCredits }),
       });
+      entry = (await r.json().catch(() => ({})))?.data;
     } else {
-      await fetch("/api/save", {
+      const r = await fetch("/api/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2290,12 +2343,16 @@ async function attachHistoryResult(job, resultUrl, costCredits) {
           refVideoSeconds: typeof job.refSecs === "number" ? job.refSecs : 0,
           projectId: job.projectId || activeProjectId,
           imageLocalIds: job.mediaLocalIds?.image || [],
+          startedAt: job.startedAt || null,
         }),
       });
+      entry = (await r.json().catch(() => ({})))?.data;
     }
     loadHistory();
+    return entry?.localVideo || null;
   } catch (err) {
     console.error("Failed to save history result:", err);
+    return null;
   }
 }
 
@@ -2320,7 +2377,18 @@ function filterHistory(entries) {
 
 // True if a saved-output URL/path points at a still image (used for ComfyUI,
 // whose output medium isn't derivable from the model id).
-const isImageFile = (u) => /\.(png|jpe?g|webp|gif|bmp)(\?|$)/i.test(u || "");
+const isImageFile = (u) => {
+  if (!u) return false;
+  let name = u;
+  // ComfyUI /view URLs carry the real name in ?filename=…; read that when present.
+  try {
+    const f = new URL(u, location.origin).searchParams.get("filename");
+    if (f) name = f;
+  } catch {
+    /* not a parseable URL — test the raw string */
+  }
+  return /\.(png|jpe?g|webp|gif|bmp)(\?|$)/i.test(name);
+};
 
 // kind/src/name for opening a history entry in the lightbox.
 function historyItemMedia(entry) {
@@ -2417,8 +2485,20 @@ function renderHistory(entries) {
       // failed/was cancelled before producing one. Prompt is preserved; Re-run works.
       const ph = document.createElement("div");
       ph.className = `hist-placeholder ${entry.status === "pending" ? "pending" : "unfinished"}`;
-      ph.textContent = entry.status === "pending" ? "⏳ Generating…" : "no output — re-run below";
+      ph.textContent =
+        entry.status === "pending" ? "⏳ Generating…" : entry.error || "no output — re-run below";
+      if (entry.error) ph.title = entry.error;
       card.appendChild(ph);
+    } else if (input.generatePreview === false) {
+      // Preview was skipped for this run — show a light click-to-open tile instead
+      // of auto-loading the media (that's the point of turning previews off).
+      const tile = document.createElement("button");
+      tile.type = "button";
+      tile.className = "hist-noprev";
+      tile.textContent = isImg ? "🖼 Open image" : "▶ Open video";
+      tile.title = "Preview was skipped for this run — click to open";
+      tile.addEventListener("click", () => openHistoryLightbox(entry));
+      card.appendChild(tile);
     } else {
       if (isImg) {
         const im = document.createElement("img");
@@ -2456,22 +2536,24 @@ function renderHistory(entries) {
       .map(([n, t]) => `${n} ${t}`)
       .join(", ");
     const cost = typeof entry.costCredits === "number" ? ` · ${entry.costCredits.toLocaleString()} credits` : "";
+    // generation run-time (wall time from submit to finished output)
+    const rt = entry.runtimeMs ? ` · ⏱ ${fmtDuration(entry.runtimeMs)}` : "";
     // show which project the entry belongs to when viewing all projects
     const proj = filter === "all" ? ` · ${projectName(entry.projectId || "default")}` : "";
     if (comfyEntry) {
       const wfName = input.workflow || input.model.slice("comfy:".length).replace(/\.json$/i, "");
       const seed = input.values?.seed;
       const seedStr = seed !== undefined && seed !== null && seed !== "" ? ` · seed ${seed}` : "";
-      meta.textContent = `${date} · ComfyUI · ${wfName}${seedStr}${counts ? ` · ${counts}` : ""}${proj}`;
+      meta.textContent = `${date} · ComfyUI · ${wfName}${seedStr}${counts ? ` · ${counts}` : ""}${rt}${proj}`;
     } else if (isImg) {
       meta.textContent =
         `${date} · ${seedreamLabel(input.model)} · ${input.quality || "basic"} · ${input.aspect_ratio || "?"}` +
-        `${counts ? ` · ${counts}` : ""}${cost}${proj}`;
+        `${counts ? ` · ${counts}` : ""}${cost}${rt}${proj}`;
     } else {
       const variant = VIDEO_VARIANT_LABEL[input.model] ? ` · ${VIDEO_VARIANT_LABEL[input.model]}` : "";
       meta.textContent =
         `${date}${variant} · ${input.resolution || "?"} · ${input.aspect_ratio || "?"} · ` +
-        `${input.duration || "?"}s${counts ? ` · ${counts}` : ""}${cost}${proj}`;
+        `${input.duration || "?"}s${counts ? ` · ${counts}` : ""}${cost}${rt}${proj}`;
     }
     body.appendChild(meta);
 
@@ -2632,6 +2714,7 @@ async function applyEntry(entry) {
     applyModelUI(); // renders the workflow's controls with defaults
     prefillComfyControls(input.values || {});
     await restoreComfyMedia(entry); // re-populate the image/video/audio fields
+    document.getElementById("generate_preview").checked = input.generatePreview !== false;
     window.scrollTo({ top: 0, behavior: "smooth" });
     return;
   }
@@ -2655,6 +2738,7 @@ async function applyEntry(entry) {
   document.getElementById("web_search").checked = !!input.web_search;
   document.getElementById("nsfw_checker").checked = !!input.nsfw_checker;
   document.getElementById("return_last_frame").checked = !!input.return_last_frame;
+  document.getElementById("generate_preview").checked = input.generatePreview !== false;
 
   const saved = await fetch("/api/images").then((r) => r.json()).then((d) => d.data || []);
   const localIds = entry.mediaLocalIds || { image: entry.imageLocalIds || [] };

@@ -210,6 +210,13 @@
           </label>
         </div>
 
+        <!-- Its own row (not hidden in ComfyUI mode, unlike the checks above). -->
+        <div class="checks" id="previewRow">
+          <label class="inline" title="Embed an inline video/image player on the finished job card. Off = just a link (still saved to History).">
+            <input id="generate_preview" type="checkbox" checked /> Generate preview
+          </label>
+        </div>
+
         <div class="submit-row">
           <button type="submit" id="submitBtn">Generate</button>
           <label class="queue-count hidden" id="comfyCountField" title="Queue this many generations">

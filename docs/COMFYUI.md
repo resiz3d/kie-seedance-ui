@@ -147,7 +147,9 @@ grouped field, which always fills in order.)
 1. Image inputs are saved to the gallery, then pushed to ComfyUI (`/upload/image`).
 2. Empty optional reference loaders are pruned; remaining tokens are substituted
    into a copy of the workflow (your file is never modified).
-3. The workflow is queued (`/prompt`); the app polls `/history/{id}`. While it runs,
+3. The workflow is queued (`/prompt`) and its **pending History entry is created in
+   the same request** (so a dropped connection right after — common on mobile —
+   can't orphan the run); the app then polls `/history/{id}`. While it runs,
    the server also listens on ComfyUI's `/ws` and reports **live progress** (sampler
    step count) — the job card shows a bar and `step N/M (X%)` — plus a **host-stats
    strip** (CPU %, GPU %, VRAM) above the job cards. The strip is shown whenever a
@@ -157,6 +159,21 @@ grouped field, which always fills in order.)
 4. The first video/animation/image output is downloaded into your `video/<project>/`
    folder and added to History — the **same folders and History** as a kie.ai
    generation, so mixed local+API projects export together. No credits are involved.
+   The History entry records the **run-time** (wall time from submit to finished
+   output), shown as `⏱ 2m 34s` in the entry's meta line. The finished job card
+   previews the **downloaded local copy** (ComfyUI's `/view` URL doesn't render a
+   reliable inline poster). Uncheck **Generate preview** before running to skip the
+   inline player entirely (job card shows a link, History shows a click-to-open
+   tile) — handy when you don't need to watch every result. It's still saved.
+
+A pending run is finished by whichever poller sees it done first: the browser, or a
+**server-side sweep** (every ~15s). The sweep is the safety net — it copies the
+output and marks the entry done **even if the browser was closed or tabbed away**
+when the run finished, as long as the app server and ComfyUI stay up. The watch list
+is just the pending ComfyUI entries in `history.json`, so it survives an app-server
+restart. If ComfyUI itself is restarted before a finished run is copied, its
+in-memory record is gone: after a short grace the entry is marked failed with a note
+(the output still sits in ComfyUI's output folder) — re-run to regenerate it.
 
 ## Notes & limits
 

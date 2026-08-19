@@ -356,7 +356,9 @@ const ALLOWED_MODELS = new Set([
 ]);
 
 app.post("/api/create", (req, res) => {
-  const { model: requestedModel, ...input } = req.body || {};
+  // `generatePreview` is a UI-only flag (stored in History, honored by the client);
+  // strip it so it isn't forwarded to the kie.ai API as an unknown input field.
+  const { model: requestedModel, generatePreview, ...input } = req.body || {};
   const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : "bytedance/seedance-2";
   const clean = {};
   for (const [k, v] of Object.entries(input)) {
@@ -733,10 +735,13 @@ async function comfyVram() {
   }
 }
 
-// Substitute a workflow's tokens and queue it on ComfyUI. Returns a promptId.
+// Substitute a workflow's tokens and queue it on ComfyUI. Returns the promptId and
+// a server-created pending History id (created atomically with queueing, so a flaky
+// client — especially mobile — can't drop between queue and history-create and
+// orphan the run).
 app.post("/api/comfy/generate", async (req, res) => {
   ensureComfyWs(); // start listening for progress before the run begins
-  const { file, values, prune } = req.body || {};
+  const { file, values, prune, input, mediaLocalIds, projectId, refVideoSeconds } = req.body || {};
   const wfPath = workflowPath(file);
   if (!wfPath || !fs.existsSync(wfPath)) {
     return res.status(400).json({ code: 400, msg: "Unknown workflow file" });
@@ -759,12 +764,63 @@ app.post("/api/comfy/generate", async (req, res) => {
     if (!r.ok || !body.prompt_id) {
       return res.status(r.status || 502).json({ code: r.status || 502, msg: formatComfyPromptError(body) });
     }
-    res.json({ code: 200, msg: "success", data: { promptId: body.prompt_id } });
+    // Create the pending History entry now, so the server-side sweep can finish the
+    // run even if the client never makes a second call.
+    let historyId = null;
+    try {
+      const proj = resolveProject(projectId);
+      const entry = makeHistoryEntry({
+        id: `${Date.now()}`,
+        taskId: body.prompt_id,
+        projectId: proj.id,
+        input: input || { model: `comfy:${file}`, values },
+        mediaLocalIds,
+        refVideoSeconds,
+        imageLocalIds: mediaLocalIds?.image || [],
+        status: "pending",
+      });
+      const entries = readJson(HISTORY_FILE);
+      entries.unshift(entry);
+      writeJson(HISTORY_FILE, entries);
+      historyId = entry.id;
+    } catch (err) {
+      console.error("Failed to create pending history entry:", err);
+    }
+    res.json({ code: 200, msg: "success", data: { promptId: body.prompt_id, historyId } });
   } catch (err) {
     console.error("ComfyUI generate error:", err);
     res.status(502).json({ code: 502, msg: `Could not reach ComfyUI at ${COMFYUI_URL}` });
   }
 });
+
+// Collect a ComfyUI history entry's output files as viewable /view URLs (video/
+// animation first, then stills).
+function collectComfyOutputs(entry) {
+  const urls = [];
+  for (const out of Object.values(entry.outputs || {})) {
+    for (const key of ["videos", "gifs", "images"]) {
+      for (const f of out[key] || []) {
+        urls.push(
+          `${COMFYUI_URL}/view?filename=${encodeURIComponent(f.filename)}` +
+            `&subfolder=${encodeURIComponent(f.subfolder || "")}&type=${encodeURIComponent(f.type || "output")}`
+        );
+      }
+    }
+  }
+  return urls;
+}
+
+// Is a prompt still queued/running on ComfyUI? true/false, or null if unknown
+// (ComfyUI unreachable).
+async function comfyPromptQueued(promptId) {
+  try {
+    const q = await fetch(`${COMFYUI_URL}/queue`).then((r) => r.json());
+    const inList = (list) => (list || []).some((it) => it[1] === promptId);
+    return inList(q.queue_running) || inList(q.queue_pending);
+  } catch {
+    return null;
+  }
+}
 
 // Poll a ComfyUI job; normalize to the kie.ai status shape the frontend expects.
 app.get("/api/comfy/status", async (req, res) => {
@@ -778,26 +834,22 @@ app.get("/api/comfy/status", async (req, res) => {
     const r = await fetch(`${COMFYUI_URL}/history/${encodeURIComponent(promptId)}`);
     const hist = await r.json().catch(() => ({}));
     const entry = hist?.[promptId];
-    if (!entry) return res.json({ code: 200, msg: "success", data: { state: "waiting", progress } });
+    if (!entry) {
+      // Not in history. Still queued/running → keep waiting; otherwise ComfyUI has
+      // no record of it (usually it was restarted) → "lost", so the UI can stop
+      // polling forever instead of spinning on "Generating…".
+      const queued = await comfyPromptQueued(promptId);
+      const state = queued === false ? "lost" : "waiting";
+      if (state === "lost") comfyProgress.delete(promptId);
+      return res.json({ code: 200, msg: "success", data: { state, progress } });
+    }
 
-    const statusStr = entry.status?.status_str;
-    if (statusStr === "error") {
+    if (entry.status?.status_str === "error") {
       comfyProgress.delete(promptId);
       return res.json({ code: 200, msg: "success", data: { state: "fail", failMsg: formatComfyExecError(entry) } });
     }
 
-    // Collect output files; prefer video/animation over still images.
-    const urls = [];
-    for (const out of Object.values(entry.outputs || {})) {
-      for (const key of ["videos", "gifs", "images"]) {
-        for (const f of out[key] || []) {
-          urls.push(
-            `${COMFYUI_URL}/view?filename=${encodeURIComponent(f.filename)}` +
-              `&subfolder=${encodeURIComponent(f.subfolder || "")}&type=${encodeURIComponent(f.type || "output")}`
-          );
-        }
-      }
-    }
+    const urls = collectComfyOutputs(entry);
     if (!urls.length) return res.json({ code: 200, msg: "success", data: { state: "waiting", progress } });
     res.json({
       code: 200,
@@ -834,6 +886,94 @@ app.post("/api/comfy/cancel", async (req, res) => {
     res.status(502).json({ code: 502, msg: `Could not reach ComfyUI at ${COMFYUI_URL}` });
   }
 });
+
+// --- server-side completion watcher ------------------------------------------
+// A pending ComfyUI run is finished by whichever poller sees it done first: the
+// browser, OR this background sweep. The sweep is the safety net — it copies the
+// output and marks the entry done even if the browser was closed/tabbed away when
+// the run finished (as long as this server + ComfyUI stay up). The watch list is
+// just the pending comfy entries in history.json, so it survives a server restart.
+const COMFY_WATCH_INTERVAL_MS = 15000;
+const COMFY_LOST_GRACE_MS = 30000; // don't declare a prompt "lost" younger than this
+let comfyWatchBusy = false;
+
+// Finish one pending entry: download its output (→ done) or mark it failed. Re-reads
+// history so it no-ops if the browser already finished the same entry.
+async function finalizePendingComfy(id, { resultUrl, fail }) {
+  const entries = readJson(HISTORY_FILE);
+  const entry = entries.find((e) => e.id === id);
+  if (!entry || entry.status !== "pending") return; // already finished elsewhere
+  if (resultUrl) {
+    entry.resultUrl = resultUrl;
+    const localVideo = await downloadOutput(resultUrl, resolveProject(entry.projectId), entry.id);
+    if (localVideo) entry.localVideo = localVideo;
+    entry.status = "done";
+    entry.runtimeMs = Date.now() - new Date(entry.createdAt).getTime();
+  } else {
+    entry.status = "failed";
+    if (fail) entry.error = fail;
+  }
+  // Re-read once more so a concurrent write (client result endpoint) isn't clobbered.
+  const latest = readJson(HISTORY_FILE);
+  const idx = latest.findIndex((e) => e.id === id);
+  if (idx >= 0 && latest[idx].status === "pending") {
+    latest[idx] = entry;
+    writeJson(HISTORY_FILE, latest);
+  }
+}
+
+async function sweepPendingComfy() {
+  if (comfyWatchBusy) return;
+  comfyWatchBusy = true;
+  try {
+    const pending = readJson(HISTORY_FILE).filter(
+      (e) => e.status === "pending" && e.taskId && (e.input?.model || "").startsWith("comfy:")
+    );
+    if (!pending.length) return;
+    let queueSnapshot = undefined; // fetched once, lazily, only if a prompt is missing
+    for (const entry of pending) {
+      let hist;
+      try {
+        hist = await fetch(`${COMFYUI_URL}/history/${encodeURIComponent(entry.taskId)}`).then((r) => r.json());
+      } catch {
+        return; // ComfyUI unreachable — leave entries pending, retry next sweep
+      }
+      const h = hist?.[entry.taskId];
+      if (h) {
+        if (h.status?.status_str === "error") {
+          await finalizePendingComfy(entry.id, { fail: formatComfyExecError(h) });
+        } else {
+          const urls = collectComfyOutputs(h);
+          if (urls.length) await finalizePendingComfy(entry.id, { resultUrl: urls[0] });
+          // in history but no outputs yet → still running; leave pending
+        }
+        continue;
+      }
+      // Not in history: give young prompts grace (submit→queue race), then decide.
+      if (Date.now() - new Date(entry.createdAt).getTime() < COMFY_LOST_GRACE_MS) continue;
+      if (queueSnapshot === undefined) {
+        try {
+          queueSnapshot = await fetch(`${COMFYUI_URL}/queue`).then((r) => r.json());
+        } catch {
+          return; // can't tell — leave pending
+        }
+      }
+      const inQ = (list) => (list || []).some((it) => it[1] === entry.taskId);
+      if (inQ(queueSnapshot.queue_running) || inQ(queueSnapshot.queue_pending)) continue; // still queued
+      await finalizePendingComfy(entry.id, {
+        fail:
+          "ComfyUI has no record of this run (it was likely restarted after it finished). " +
+          "Any output stays in ComfyUI's output folder; re-run to regenerate into the app.",
+      });
+    }
+  } catch (err) {
+    console.error("ComfyUI sweep error:", err);
+  } finally {
+    comfyWatchBusy = false;
+  }
+}
+setInterval(sweepPendingComfy, COMFY_WATCH_INTERVAL_MS);
+setTimeout(sweepPendingComfy, 4000); // an early pass shortly after startup
 
 // Host CPU % + GPU util % + VRAM usage, for the live readout during local runs.
 app.get("/api/comfy/stats", async (req, res) => {
@@ -1329,7 +1469,7 @@ async function downloadOutput(resultUrl, proj, id) {
 }
 
 // Build a history entry object (output fields may be null for a pending entry).
-function makeHistoryEntry({ id, taskId, projectId, input, resultUrl, localVideo, costCredits, refVideoSeconds, imageLocalIds, mediaLocalIds, status }) {
+function makeHistoryEntry({ id, taskId, projectId, input, resultUrl, localVideo, costCredits, refVideoSeconds, imageLocalIds, mediaLocalIds, status, runtimeMs }) {
   return {
     id,
     createdAt: new Date().toISOString(),
@@ -1340,6 +1480,8 @@ function makeHistoryEntry({ id, taskId, projectId, input, resultUrl, localVideo,
     localVideo: localVideo || null,
     costCredits: typeof costCredits === "number" ? costCredits : null,
     status: status || "done",
+    // wall time from submit to finished output (ms); null until done
+    runtimeMs: typeof runtimeMs === "number" ? runtimeMs : null,
     // total seconds of reference video inputs (video refs bill by combined duration)
     refVideoSeconds: typeof refVideoSeconds === "number" ? refVideoSeconds : 0,
     imageLocalIds: Array.isArray(imageLocalIds) ? imageLocalIds : [],
@@ -1350,15 +1492,17 @@ function makeHistoryEntry({ id, taskId, projectId, input, resultUrl, localVideo,
 
 // --- save a finished generation to history (+ download the video) -------
 app.post("/api/save", async (req, res) => {
-  const { input, taskId, resultUrl, costCredits, imageLocalIds, mediaLocalIds, projectId, refVideoSeconds } =
+  const { input, taskId, resultUrl, costCredits, imageLocalIds, mediaLocalIds, projectId, refVideoSeconds, startedAt } =
     req.body || {};
   if (!resultUrl) return res.status(400).json({ code: 400, msg: "resultUrl is required" });
 
   const proj = resolveProject(projectId);
   const id = `${Date.now()}`;
   const localVideo = await downloadOutput(resultUrl, proj, id);
+  // No pending entry existed, so runtime comes from the client's job start time.
+  const runtimeMs = typeof startedAt === "number" ? Date.now() - startedAt : null;
   const entry = makeHistoryEntry({
-    id, taskId, projectId: proj.id, input, resultUrl, localVideo, costCredits, refVideoSeconds, imageLocalIds, mediaLocalIds,
+    id, taskId, projectId: proj.id, input, resultUrl, localVideo, costCredits, refVideoSeconds, imageLocalIds, mediaLocalIds, runtimeMs,
   });
   const entries = readJson(HISTORY_FILE);
   entries.unshift(entry);
@@ -1388,6 +1532,12 @@ app.post("/api/history/:id/result", async (req, res) => {
   const entry = entries.find((e) => e.id === req.params.id);
   if (!entry) return res.status(404).json({ code: 404, msg: "history entry not found" });
 
+  // Idempotent: if the server-side sweep already finished this entry, don't
+  // re-download or recompute the run-time.
+  if (entry.status === "done" && entry.localVideo) {
+    return res.json({ code: 200, msg: "already-done", data: entry });
+  }
+
   if (resultUrl) {
     entry.resultUrl = resultUrl;
     const localVideo = await downloadOutput(resultUrl, resolveProject(entry.projectId), entry.id);
@@ -1395,6 +1545,7 @@ app.post("/api/history/:id/result", async (req, res) => {
   }
   if (typeof costCredits === "number") entry.costCredits = costCredits;
   entry.status = "done";
+  entry.runtimeMs = Date.now() - new Date(entry.createdAt).getTime();
   writeJson(HISTORY_FILE, entries);
   res.json({ code: 200, msg: "updated", data: entry });
 });
