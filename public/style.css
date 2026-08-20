@@ -248,6 +248,10 @@ select:focus {
   min-height: 8rem;
 }
 
+#comfyControls > .field > textarea {
+  min-height: 25rem !important;
+}
+
 select option {
   background: var(--panel);
   color: var(--text);
@@ -1181,9 +1185,14 @@ img.zoomable {
   gap: 16px;
   align-items: start;
 }
-.comfy-grid > * { grid-column: span 12; margin: 0; } /* default: own line */
+.comfy-grid > * {
+  grid-column: span 12;
+  margin: 0;
+} /* default: own line */
 @media (max-width: 680px) {
-  .comfy-grid > * { grid-column: span 12 !important; } /* stack on narrow screens */
+  .comfy-grid > * {
+    grid-column: span 12 !important;
+  } /* stack on narrow screens */
 }
 
 /* Job card: cancel button + cancelled/pending states */
@@ -1197,9 +1206,19 @@ img.zoomable {
   border-radius: 6px;
   cursor: pointer;
 }
-.job-cancel:hover { color: var(--error); border-color: var(--error); }
-.job-cancel:disabled { opacity: 0.5; cursor: default; }
-.job-note { color: var(--muted); font-size: 0.9rem; margin: 4px 0; }
+.job-cancel:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+.job-cancel:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.job-note {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 4px 0;
+}
 
 /* History placeholder for pending / unfinished (failed or cancelled) entries */
 .hist-placeholder {
@@ -1214,7 +1233,9 @@ img.zoomable {
   border: 1px dashed var(--border);
   border-radius: 8px;
 }
-.hist-placeholder.pending { border-style: solid; }
+.hist-placeholder.pending {
+  border-style: solid;
+}
 
 /* Queue-count control next to Generate (local ComfyUI) */
 .queue-count {
@@ -1226,7 +1247,14 @@ img.zoomable {
   font-size: 0.9rem;
   font-weight: 400;
 }
-.queue-count input { width: 3.4rem; padding: 0.4rem 0.5rem; }
+.queue-count input {
+  width: 3.4rem;
+  padding: 0.4rem 0.5rem;
+}
 
 /* History delete button — danger hover */
-.hist-delete:hover:not(:disabled) { background: var(--error); border-color: var(--error); color: #fff; }
+.hist-delete:hover:not(:disabled) {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}

@@ -1187,6 +1187,15 @@ function restoreLastModel() {
   applyModelUI();
 }
 
+// A combo is a "file picker" (checkpoint/VAE/CLIP/LoRA selector) when its choices
+// are model filenames — those belong in the ComfyUI Settings drawer. Plain enum
+// combos (sampler_name, scheduler) have no file extension and stay in the main form.
+function isFilePickerCombo(token) {
+  return (token.comboOptions || []).some((o) =>
+    /\.(safetensors|ckpt|pt|pth|bin|gguf|onnx|sft)$/i.test(String(o)),
+  );
+}
+
 // Choose a control type from a token's name/options. Media checks are ordered
 // audio → video → image so "ref_video_audio" (a video's audio track) reads as audio.
 function comfyControlType(token) {
@@ -1436,6 +1445,11 @@ async function renderComfyControls() {
   // Order by the "; #N" hint; items without one keep scan order, after ordered ones.
   items.sort((a, b) => (a.order ?? 1000 + a.scanIndex) - (b.order ?? 1000 + b.scanIndex));
 
+  // The "ComfyUI Settings" drawer is for installed-model-file pickers (checkpoints,
+  // VAEs, CLIPs — big `.safetensors` lists) and the toggles for optional patch nodes
+  // (e.g. Sage Attention). Plain enum combos like sampler_name / scheduler are
+  // generation params and stay in the main form next to steps/seed/duration.
+  const bypassIds = new Set((meta.bypassable || []).map((b) => String(b.id)));
   const settingsScalars = [];
   for (const it of items) {
     if (it.kind === "series") {
@@ -1449,9 +1463,10 @@ async function renderComfyControls() {
       ctrl.el.style.gridColumn = `span ${comfySpan(it.token, it.type)}`;
       comfyControlsEl.appendChild(ctrl.el);
       comfyFields.push(ctrl);
-    } else if (it.token.combo) {
-      settingsScalars.push(it); // installed-file pickers live in the settings drawer
+    } else if (it.token.combo && (isFilePickerCombo(it.token) || bypassIds.has(String(it.token.nodeId ?? "")))) {
+      settingsScalars.push(it); // installed-file pickers + patch-node toggles → drawer
     } else {
+      // numbers, text, inline-option selects, and non-file object_info combos (sampler)
       renderScalarControl(it.token, it.type, comfyControlsEl);
     }
   }
@@ -1472,7 +1487,6 @@ async function renderComfyControls() {
   // node's controls render inside its toggle's group (hidden when disabled); the
   // checkbox sits directly above them.
   comfyBypassControl = (meta.bypassable || []).length ? makeComfyBypassControl(meta.bypassable) : null;
-  const bypassIds = new Set((meta.bypassable || []).map((b) => String(b.id)));
   for (const it of settingsScalars) {
     const nid = String(it.token.nodeId ?? "");
     if (comfyBypassControl && bypassIds.has(nid)) {

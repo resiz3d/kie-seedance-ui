@@ -691,13 +691,17 @@ function enrichToken(token, nodeMap, objectInfo) {
   const spec = info?.input?.required?.[loc.input] || info?.input?.optional?.[loc.input];
   if (!Array.isArray(spec)) return token;
   const [type, cfg] = spec;
-  if (Array.isArray(type)) {
+  // A combo (enum) is reported one of two ways: legacy nodes put the choices array
+  // directly in `type` (e.g. VAELoader.vae_name); newer-schema nodes report the
+  // string "COMBO" with the choices in cfg.options (e.g. KSamplerSelect.sampler_name).
+  const comboOptions = Array.isArray(type) ? type : type === "COMBO" ? cfg?.options : null;
+  if (Array.isArray(comboOptions)) {
     const key = (loc.input || "").toLowerCase();
     let uploadKind = null;
     if (cfg?.image_upload || key === "image") uploadKind = "image";
     else if (cfg?.video_upload || key === "video") uploadKind = "video";
     else if (cfg?.audio_upload || key === "audio") uploadKind = "audio";
-    return { ...token, combo: true, comboOptions: type, uploadKind };
+    return { ...token, combo: true, comboOptions, uploadKind };
   }
   if (type === "FLOAT" || type === "INT") {
     // ComfyUI reports "unbounded" fields with sentinel bounds (±sys.maxsize,
