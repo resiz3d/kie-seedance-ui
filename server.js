@@ -1082,6 +1082,27 @@ function collectComfyOutputs(entry) {
   return urls;
 }
 
+// Actual execution time for a finished prompt, from ComfyUI's own timestamps in
+// `status.messages` (execution_start → execution_success/error, epoch ms). This is
+// the per-prompt run time — unlike now-minus-createdAt, it excludes time the prompt
+// spent waiting behind earlier items when several are queued at once. Returns ms, or
+// null if the timestamps aren't present.
+function comfyExecRuntime(entry) {
+  const messages = entry?.status?.messages;
+  if (!Array.isArray(messages)) return null;
+  let start = null;
+  let end = null;
+  for (const m of messages) {
+    const [type, data] = m || [];
+    const ts = Number(data?.timestamp);
+    if (!Number.isFinite(ts)) continue;
+    if (type === "execution_start") start = start == null ? ts : Math.min(start, ts);
+    else if (type === "execution_success" || type === "execution_error" || type === "execution_interrupted")
+      end = end == null ? ts : Math.max(end, ts);
+  }
+  return start != null && end != null && end >= start ? end - start : null;
+}
+
 // Is a prompt still queued/running on ComfyUI? true/false, or null if unknown
 // (ComfyUI unreachable).
 async function comfyPromptQueued(promptId) {
@@ -1126,7 +1147,9 @@ app.get("/api/comfy/status", async (req, res) => {
     res.json({
       code: 200,
       msg: "success",
-      data: { state: "success", resultJson: JSON.stringify({ resultUrls: urls }) },
+      // runtimeMs is ComfyUI's own per-prompt execution time so the client can store
+      // the actual run time, not now-minus-created (which over-counts queued items).
+      data: { state: "success", resultJson: JSON.stringify({ resultUrls: urls }), runtimeMs: comfyExecRuntime(entry) },
     });
   } catch (err) {
     console.error("ComfyUI status error:", err);
@@ -1171,7 +1194,7 @@ let comfyWatchBusy = false;
 
 // Finish one pending entry: download its output (→ done) or mark it failed. Re-reads
 // history so it no-ops if the browser already finished the same entry.
-async function finalizePendingComfy(id, { resultUrl, fail }) {
+async function finalizePendingComfy(id, { resultUrl, fail, runtimeMs }) {
   const entries = readJson(HISTORY_FILE);
   const entry = entries.find((e) => e.id === id);
   if (!entry || entry.status !== "pending") return; // already finished elsewhere
@@ -1180,7 +1203,10 @@ async function finalizePendingComfy(id, { resultUrl, fail }) {
     const localVideo = await downloadOutput(resultUrl, resolveProject(entry.projectId), entry.id);
     if (localVideo) entry.localVideo = localVideo;
     entry.status = "done";
-    entry.runtimeMs = Date.now() - new Date(entry.createdAt).getTime();
+    // Prefer ComfyUI's own per-prompt execution time; fall back to since-created only
+    // when it's unavailable (older ComfyUI / missing timestamps).
+    entry.runtimeMs =
+      typeof runtimeMs === "number" ? runtimeMs : Date.now() - new Date(entry.createdAt).getTime();
   } else {
     entry.status = "failed";
     if (fail) entry.error = fail;
@@ -1216,7 +1242,7 @@ async function sweepPendingComfy() {
           await finalizePendingComfy(entry.id, { fail: formatComfyExecError(h) });
         } else {
           const urls = collectComfyOutputs(h);
-          if (urls.length) await finalizePendingComfy(entry.id, { resultUrl: urls[0] });
+          if (urls.length) await finalizePendingComfy(entry.id, { resultUrl: urls[0], runtimeMs: comfyExecRuntime(h) });
           // in history but no outputs yet → still running; leave pending
         }
         continue;
@@ -1799,7 +1825,7 @@ app.post("/api/history", (req, res) => {
 
 // --- attach the finished output to a pending entry (downloads the file) -------
 app.post("/api/history/:id/result", async (req, res) => {
-  const { resultUrl, costCredits } = req.body || {};
+  const { resultUrl, costCredits, runtimeMs } = req.body || {};
   const entries = readJson(HISTORY_FILE);
   const entry = entries.find((e) => e.id === req.params.id);
   if (!entry) return res.status(404).json({ code: 404, msg: "history entry not found" });
@@ -1817,7 +1843,10 @@ app.post("/api/history/:id/result", async (req, res) => {
   }
   if (typeof costCredits === "number") entry.costCredits = costCredits;
   entry.status = "done";
-  entry.runtimeMs = Date.now() - new Date(entry.createdAt).getTime();
+  // Prefer a caller-supplied run time (ComfyUI's real per-prompt execution time);
+  // fall back to since-created for kie.ai jobs, which are submitted one at a time.
+  entry.runtimeMs =
+    typeof runtimeMs === "number" ? runtimeMs : Date.now() - new Date(entry.createdAt).getTime();
   writeJson(HISTORY_FILE, entries);
   res.json({ code: 200, msg: "updated", data: entry });
 });

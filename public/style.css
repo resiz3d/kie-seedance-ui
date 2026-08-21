@@ -451,7 +451,7 @@ img.zoomable {
 }
 
 .hist-card .hist-img {
-  width: 140px;
+  width: 200px;
   flex-shrink: 0;
   height: auto;
   align-self: flex-start;
@@ -847,8 +847,21 @@ img.zoomable {
   padding: 0.75rem;
 }
 
+/* Fixed-width media wrapper: keeps the flex row from stretching the media to the
+   card's (now taller) height, so portrait videos keep their aspect ratio. */
+.hist-thumb {
+  width: 200px;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+.hist-thumb video,
+.hist-thumb .hist-img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
 .hist-card video {
-  width: 140px;
+  width: 200px;
   flex-shrink: 0;
   height: auto;
   border-radius: 8px;
@@ -880,15 +893,8 @@ img.zoomable {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-}
-
-.hist-prompt {
-  font-size: 0.88rem;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+  /* Column layout: buttons, Settings dropdown, timestamp — 2em apart. */
+  gap: 2em;
 }
 
 .hist-meta {
@@ -896,11 +902,183 @@ img.zoomable {
   color: var(--muted);
 }
 
+/* Collapsible settings + full-prompt panel on each history card. */
+.hist-details {
+  font-size: 0.8rem;
+}
+.hist-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+  width: fit-content;
+}
+.hist-details > summary:hover {
+  color: var(--text);
+}
+.hist-details-body {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.hist-settings {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0;
+}
+.hist-settings dt {
+  color: var(--muted);
+}
+.hist-settings dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+/* Reference-media thumbnails inside the Settings dropdown. */
+.hist-refs-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.hist-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.hist-ref {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--bg);
+}
+/* Image references are shown larger and carry the action buttons. */
+.hist-ref.hist-ref-lg {
+  width: 144px;
+  height: 144px;
+}
+/* Overlay action bar (Open / Add) — always visible, clearer on hover. */
+.hist-ref-bar {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: flex;
+  gap: 4px;
+  opacity: 0.75;
+  transition: opacity 0.15s;
+}
+.hist-ref:hover .hist-ref-bar {
+  opacity: 1;
+}
+.hist-ref-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hist-ref-btn:hover {
+  background: rgba(0, 0, 0, 0.85);
+}
+.hist-ref img,
+.hist-ref video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.hist-ref .audio-tile {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  text-align: center;
+  padding: 2px;
+}
+.hist-ref .audio-name {
+  font-size: 0.6rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.hist-ref .kind-badge {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  font-size: 0.6rem;
+  padding: 0 0.25rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+.hist-fullprompt {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 16rem;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  line-height: 1.4;
+}
+
 .hist-actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
-  margin-top: auto;
+}
+
+/* History pagination controls */
+.hist-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  margin-top: 1rem;
+}
+.hist-page-btn {
+  min-width: 2.2rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.hist-page-btn:hover:not(:disabled):not(.current) {
+  border-color: var(--muted);
+}
+.hist-page-btn.current {
+  background: var(--accent, #3b82f6);
+  border-color: var(--accent, #3b82f6);
+  color: #fff;
+  cursor: default;
+}
+.hist-page-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.hist-page-gap {
+  color: var(--muted);
+  padding: 0 0.15rem;
 }
 
 .hist-actions button,
@@ -1069,6 +1247,7 @@ img.zoomable {
   .hist-card {
     flex-direction: column;
   }
+  .hist-thumb,
   .hist-card video,
   .hist-card .hist-img {
     width: 100%;

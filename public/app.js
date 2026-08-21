@@ -17,6 +17,7 @@ const projectCreditsBreakdown = document.getElementById("projectCreditsBreakdown
 
 // History
 const historyEl = document.getElementById("history");
+const historyPager = document.getElementById("historyPager");
 const historyEmpty = document.getElementById("historyEmpty");
 const historyFilter = document.getElementById("historyFilter");
 
@@ -70,6 +71,8 @@ function removeInflight(taskId) {
 
 let currentCredits = null;
 let historyEntries = [];
+const HISTORY_PAGE_SIZE = 20; // history cards per page
+let historyPage = 1; // 1-based; clamped to the available page count on render
 let galleryItems = [];
 
 function show(el) {
@@ -566,6 +569,14 @@ async function loadProjects() {
     console.error("Failed to load projects:", err);
     projects = [{ id: "default", name: "Default" }];
   }
+  // Alphabetical (case-insensitive) everywhere the list is shown — the project pill,
+  // the history filter, and the "move to project" dropdown all iterate `projects`.
+  // Default stays pinned first as the system catch-all.
+  projects.sort((a, b) => {
+    if (a.id === "default") return -1;
+    if (b.id === "default") return 1;
+    return (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" });
+  });
   if (!projects.some((p) => p.id === activeProjectId)) activeProjectId = "default";
   renderProjectControls();
 }
@@ -605,11 +616,15 @@ function setActiveProject(id) {
   projectSelect.value = id;
   historyFilter.value = id;
   renderGallery(galleryItems);
+  historyPage = 1; // changing the filtered set starts back at the first page
   renderHistory(historyEntries);
 }
 
 projectSelect.addEventListener("change", () => setActiveProject(projectSelect.value));
-historyFilter.addEventListener("change", () => renderHistory(historyEntries));
+historyFilter.addEventListener("change", () => {
+  historyPage = 1; // new filter → back to page 1
+  renderHistory(historyEntries);
+});
 
 // open the output folder matching the history filter (all → video/ root)
 document.getElementById("openFolder").addEventListener("click", async () => {
@@ -1759,6 +1774,14 @@ function makeComfyMediaMulti(base, mediaKind, tokenNames) {
       }
       list.render();
     },
+    // Append one saved file (from a history card's reference thumbnail). Respects
+    // the field's capacity; returns false if it's full or the item has no local id.
+    addMedia(item) {
+      if (!item?.id) return false;
+      if (ready().length >= max) return false;
+      list.addFromGallery({ id: item.id, localUrl: item.url, name: item.name });
+      return true;
+    },
     peekMedia: () =>
       ready()
         .filter((i) => i.localId)
@@ -1997,7 +2020,8 @@ async function pollComfyJob(job) {
     finishLive(job);
     const url = JSON.parse(data.data.resultJson || "{}").resultUrls?.[0];
     if (!url) return failJob(job, "Finished, but ComfyUI returned no output file.");
-    await attachHistoryResult(job, url, null); // downloads, marks done, refreshes History
+    // Pass ComfyUI's real per-prompt run time so queued items aren't over-counted.
+    await attachHistoryResult(job, url, null, data.data.runtimeMs); // downloads, marks done, refreshes History
     return;
   }
   if (state === "fail") {
@@ -2432,14 +2456,14 @@ async function createHistoryEntry(input, taskId, mediaLocalIds, projectId, refSe
 // Returns the saved local file path (/video/…) so callers can preview the
 // downloaded copy instead of the source URL (ComfyUI's /view URL doesn't render a
 // reliable inline poster; the local file does).
-async function attachHistoryResult(job, resultUrl, costCredits) {
+async function attachHistoryResult(job, resultUrl, costCredits, runtimeMs) {
   try {
     let entry = null;
     if (job.historyId) {
       const r = await fetch(`/api/history/${job.historyId}/result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resultUrl, costCredits }),
+        body: JSON.stringify({ resultUrl, costCredits, runtimeMs }),
       });
       entry = (await r.json().catch(() => ({})))?.data;
     } else {
@@ -2576,6 +2600,230 @@ function renderProjectCredits() {
   }
 }
 
+// A collapsible <details> holding this run's generation settings and its full,
+// untrimmed prompt. Which settings apply depends on the model family: ComfyUI (H3)
+// runs use megapixels + sampler/scheduler/steps; Seedance video uses resolution +
+// duration; Seedream images use quality + format. Rows with no value are omitted.
+function buildHistDetails(entry, input, comfyEntry, isImg) {
+  const rows = [];
+  const push = (label, val) => {
+    if (val === undefined || val === null || val === "") return;
+    rows.push([label, String(val)]);
+  };
+  if (comfyEntry) {
+    const v = input.values || {};
+    push("Aspect ratio", v.aspect_ratio);
+    push("Size (MP)", v.megapixels);
+    push("Sampler", v.sampler);
+    push("Scheduler", v.scheduler);
+    push("Steps", v.steps);
+    push("Seed", v.seed);
+    push("Duration", v.duration != null && v.duration !== "" ? `${v.duration}s` : v.duration);
+  } else if (isImg) {
+    push("Aspect ratio", input.aspect_ratio);
+    push("Quality", input.quality);
+    push("Format", input.output_format);
+    push("Seed", input.seed);
+  } else {
+    push("Resolution", input.resolution);
+    push("Aspect ratio", input.aspect_ratio);
+    push("Duration", input.duration != null && input.duration !== "" ? `${input.duration}s` : input.duration);
+    push("Seed", input.seed);
+  }
+
+  const details = document.createElement("details");
+  details.className = "hist-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "Settings & full prompt";
+  details.appendChild(summary);
+
+  const dbody = document.createElement("div");
+  dbody.className = "hist-details-body";
+  if (rows.length) {
+    const dl = document.createElement("dl");
+    dl.className = "hist-settings";
+    for (const [k, val] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = val;
+      dl.append(dt, dd);
+    }
+    dbody.appendChild(dl);
+  }
+
+  // Thumbnails for any reference media (images, video, audio) used by this run.
+  const refs = historyRefMedia(entry);
+  if (refs.length) {
+    const label = document.createElement("div");
+    label.className = "hist-refs-label";
+    label.textContent = "Reference media";
+    const grid = document.createElement("div");
+    grid.className = "hist-refs";
+    for (const r of refs) {
+      const cell = document.createElement("div");
+      // Images are larger and carry action buttons; video/audio stay compact.
+      cell.className =
+        "hist-ref" + (r.kind === "image" ? " hist-ref-lg" : "") + (r.kind === "audio" ? " audio-thumb" : "");
+      cell.title = r.name || r.kind;
+      cell.appendChild(makeThumbContent(r.kind, { thumb: r.thumb, name: r.name }));
+      if (r.kind === "image") {
+        const bar = document.createElement("div");
+        bar.className = "hist-ref-bar";
+        const openB = document.createElement("button");
+        openB.type = "button";
+        openB.className = "hist-ref-btn";
+        openB.textContent = "⛶";
+        openB.title = "Open in a larger view";
+        openB.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openLightbox("image", r.thumb, r.name);
+        });
+        const addB = document.createElement("button");
+        addB.type = "button";
+        addB.className = "hist-ref-btn";
+        addB.textContent = "＋";
+        addB.title = "Add to the current picture field";
+        addB.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const ok = addRefToPictureField(r);
+          addB.textContent = ok ? "✓" : "⚠";
+          setTimeout(() => (addB.textContent = "＋"), 1000);
+        });
+        bar.append(openB, addB);
+        cell.appendChild(bar);
+      } else {
+        const badge = document.createElement("span");
+        badge.className = "img-label kind-badge";
+        badge.textContent = r.kind;
+        cell.appendChild(badge);
+      }
+      grid.appendChild(cell);
+    }
+    dbody.append(label, grid);
+  }
+
+  const fp = document.createElement("div");
+  fp.className = "hist-fullprompt";
+  fp.textContent = input.prompt || "(no prompt)";
+  dbody.appendChild(fp);
+  details.appendChild(dbody);
+  return details;
+}
+
+// The reference media (image/video/audio) used by a history entry, as
+// {kind, thumb, name}. Finished kie.ai runs store hosted URLs in `input`; ComfyUI
+// and pending runs store local ids in `mediaLocalIds`, resolved to saved-file URLs
+// via the cached gallery list. Unresolvable local ids (file deleted) are skipped.
+function historyRefMedia(entry) {
+  const input = entry.input || {};
+  const mli = entry.mediaLocalIds || {};
+  const byId = new Map(galleryItems.map((i) => [i.id, i]));
+  const out = [];
+  const addUrls = (urls, kind) => {
+    for (const u of urls || []) if (u) out.push({ kind, id: null, thumb: u, name: urlBasename(u) });
+  };
+  const addLocal = (ids, kind) => {
+    for (const id of ids || []) {
+      const m = byId.get(id);
+      if (m) out.push({ kind, id: m.id, thumb: m.localUrl, name: m.name });
+    }
+  };
+  const imgUrls = input.reference_image_urls || input.image_urls;
+  if (imgUrls?.length) addUrls(imgUrls, "image");
+  else addLocal(mli.image || entry.imageLocalIds, "image");
+  if (input.reference_video_urls?.length) addUrls(input.reference_video_urls, "video");
+  else addLocal(mli.video, "video");
+  if (input.reference_audio_urls?.length) addUrls(input.reference_audio_urls, "audio");
+  else addLocal(mli.audio, "audio");
+  return out;
+}
+
+// Add a reference image to the current form's picture field. In ComfyUI mode this
+// is the workflow's first image media field (which needs a local file); otherwise
+// it's the kie.ai Reference-images list (which also accepts a hosted URL). Returns
+// true on success, false if the field is full or a local file was required but the
+// reference is a remote-only URL.
+function addRefToPictureField(r) {
+  const comfyActive = comfyControlsEl && !comfyControlsEl.classList.contains("hidden");
+  const comfyImg = comfyActive
+    ? comfyFields.find((f) => f.mediaKind === "image" && typeof f.addMedia === "function")
+    : null;
+  if (comfyImg) {
+    // ComfyUI needs a saved local file; remote-only kie URLs can't be used here.
+    return comfyImg.addMedia({ id: r.id, url: r.thumb, name: r.name });
+  }
+  if (r.id) {
+    lists.image.addFromGallery({ id: r.id, localUrl: r.thumb, name: r.name });
+  } else {
+    lists.image.addUrl(r.thumb);
+  }
+  return true;
+}
+
+// Best-effort human filename from a media URL (handles ComfyUI ?filename= URLs).
+function urlBasename(u) {
+  try {
+    const p = new URL(u, location.origin);
+    return p.searchParams.get("filename") || decodeURIComponent(p.pathname.split("/").pop() || "") || u;
+  } catch {
+    return String(u).split("/").pop() || u;
+  }
+}
+
+// Jump to a history page and re-render (used by the pager buttons).
+function goHistoryPage(n) {
+  historyPage = n;
+  renderHistory(historyEntries);
+  historyEl.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// The compact page numbers to show: always first & last, the current page ±1, with
+// null standing in for an ellipsis gap. e.g. 1 … 4 5 6 … 20.
+function historyPageNumbers(current, total) {
+  const pages = new Set([1, total, current, current - 1, current + 1]);
+  const shown = [...pages].filter((p) => p >= 1 && p <= total).sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const p of shown) {
+    if (p - prev > 1) out.push(null); // gap → ellipsis
+    out.push(p);
+    prev = p;
+  }
+  return out;
+}
+
+// Prev / numbered / Next controls under the history list. Hidden when everything
+// fits on one page.
+function renderHistoryPager(pageCount) {
+  historyPager.innerHTML = "";
+  historyPager.classList.toggle("hidden", pageCount <= 1);
+  if (pageCount <= 1) return;
+
+  const mkBtn = (label, page, { disabled = false, current = false } = {}) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "hist-page-btn" + (current ? " current" : "");
+    b.textContent = label;
+    b.disabled = disabled;
+    if (!disabled && !current) b.addEventListener("click", () => goHistoryPage(page));
+    return b;
+  };
+
+  historyPager.appendChild(mkBtn("‹ Prev", historyPage - 1, { disabled: historyPage <= 1 }));
+  for (const p of historyPageNumbers(historyPage, pageCount)) {
+    if (p === null) {
+      const gap = document.createElement("span");
+      gap.className = "hist-page-gap";
+      gap.textContent = "…";
+      historyPager.appendChild(gap);
+    } else {
+      historyPager.appendChild(mkBtn(String(p), p, { current: p === historyPage }));
+    }
+  }
+  historyPager.appendChild(mkBtn("Next ›", historyPage + 1, { disabled: historyPage >= pageCount }));
+}
+
 function renderHistory(entries) {
   renderProjectCredits();
   historyEl.innerHTML = "";
@@ -2583,7 +2831,16 @@ function renderHistory(entries) {
   const visible = filterHistory(entries);
   historyEmpty.classList.toggle("hidden", visible.length > 0);
 
-  for (const entry of visible) {
+  // Paginate: clamp the page to the current count (entries may have been deleted or
+  // filtered), then render just this page's slice. The lightbox still walks the full
+  // filtered list, so ‹ › navigation isn't interrupted by page boundaries.
+  const pageCount = Math.max(1, Math.ceil(visible.length / HISTORY_PAGE_SIZE));
+  historyPage = Math.min(Math.max(1, historyPage), pageCount);
+  const start = (historyPage - 1) * HISTORY_PAGE_SIZE;
+  const pageEntries = visible.slice(start, start + HISTORY_PAGE_SIZE);
+  renderHistoryPager(pageCount);
+
+  for (const entry of pageEntries) {
     const input = entry.input || {};
     const card = document.createElement("div");
     card.className = "hist-card";
@@ -2611,45 +2868,35 @@ function renderHistory(entries) {
       }
     } else {
       // History always shows a thumbnail — a <video preload="metadata"> renders the
-      // first frame without downloading the whole file.
+      // first frame without downloading the whole file. The media is wrapped in a
+      // fixed-width thumb so the flex row can't stretch it to the card's height.
+      const thumb = document.createElement("div");
+      thumb.className = "hist-thumb";
       if (isImg) {
         const im = document.createElement("img");
         im.src = output; // localVideo holds the saved output file
         im.className = "hist-img zoomable";
         im.loading = "lazy";
         im.addEventListener("click", () => openHistoryLightbox(entry)); // full-size, with ‹ › nav
-        card.appendChild(im);
+        thumb.appendChild(im);
       } else {
         const vid = document.createElement("video");
         vid.src = output;
         vid.controls = true;
         vid.preload = "metadata";
-        card.appendChild(vid);
+        thumb.appendChild(vid);
       }
+      card.appendChild(thumb);
     }
 
     const body = document.createElement("div");
     body.className = "hist-body";
 
-    const prompt = document.createElement("div");
-    prompt.className = "hist-prompt";
-    prompt.textContent = input.prompt || "(no prompt)";
-    body.appendChild(prompt);
-
+    // Timestamp line (built here, appended last in the column). Seed and reference
+    // counts live in the Settings dropdown now, so they're omitted here.
     const meta = document.createElement("div");
     meta.className = "hist-meta";
     const date = new Date(entry.createdAt).toLocaleString();
-    // Reference counts — fall back to mediaLocalIds (a pending entry's stored input
-    // has no hosted URLs yet).
-    const mli = entry.mediaLocalIds || {};
-    const counts = [
-      [(input.reference_image_urls || input.image_urls || mli.image || []).length, "img"],
-      [(input.reference_video_urls || mli.video || []).length, "vid"],
-      [(input.reference_audio_urls || mli.audio || []).length, "aud"],
-    ]
-      .filter(([n]) => n > 0)
-      .map(([n, t]) => `${n} ${t}`)
-      .join(", ");
     const cost = typeof entry.costCredits === "number" ? ` · ${entry.costCredits.toLocaleString()} credits` : "";
     // generation run-time (wall time from submit to finished output)
     const rt = entry.runtimeMs ? ` · ⏱ ${fmtDuration(entry.runtimeMs)}` : "";
@@ -2657,20 +2904,17 @@ function renderHistory(entries) {
     const proj = filter === "all" ? ` · ${projectName(entry.projectId || "default")}` : "";
     if (comfyEntry) {
       const wfName = input.workflow || input.model.slice("comfy:".length).replace(/\.json$/i, "");
-      const seed = input.values?.seed;
-      const seedStr = seed !== undefined && seed !== null && seed !== "" ? ` · seed ${seed}` : "";
-      meta.textContent = `${date} · ComfyUI · ${wfName}${seedStr}${counts ? ` · ${counts}` : ""}${rt}${proj}`;
+      meta.textContent = `${date} · ComfyUI · ${wfName}${rt}${proj}`;
     } else if (isImg) {
       meta.textContent =
         `${date} · ${seedreamLabel(input.model)} · ${input.quality || "basic"} · ${input.aspect_ratio || "?"}` +
-        `${counts ? ` · ${counts}` : ""}${cost}${rt}${proj}`;
+        `${cost}${rt}${proj}`;
     } else {
       const variant = VIDEO_VARIANT_LABEL[input.model] ? ` · ${VIDEO_VARIANT_LABEL[input.model]}` : "";
       meta.textContent =
         `${date}${variant} · ${input.resolution || "?"} · ${input.aspect_ratio || "?"} · ` +
-        `${input.duration || "?"}s${counts ? ` · ${counts}` : ""}${cost}${rt}${proj}`;
+        `${input.duration || "?"}s${cost}${rt}${proj}`;
     }
-    body.appendChild(meta);
 
     const actions = document.createElement("div");
     actions.className = "hist-actions";
@@ -2790,9 +3034,11 @@ function renderHistory(entries) {
     del.type = "button";
     del.className = "btn-secondary hist-delete";
     del.innerHTML = '<span class="btn-ico">🗑</span> Delete';
-    del.title = "Delete this history item";
-    del.addEventListener("click", async () => {
-      if (!confirm("Delete this history item? This also removes its saved output file and can't be undone.")) return;
+    del.title = "Delete this history item (Ctrl+click to skip confirmation)";
+    del.addEventListener("click", async (e) => {
+      // Ctrl (or ⌘) + click deletes immediately, skipping the confirm prompt.
+      const skipConfirm = e.ctrlKey || e.metaKey;
+      if (!skipConfirm && !confirm("Delete this history item? This also removes its saved output file and can't be undone.")) return;
       del.disabled = true;
       try {
         const res = await fetch(`/api/history/${entry.id}`, { method: "DELETE" });
@@ -2805,7 +3051,11 @@ function renderHistory(entries) {
     });
     actions.appendChild(del);
 
+    // Right column: buttons on top, then the Settings dropdown, then the timestamp,
+    // separated by 2em gaps (see .hist-body spacing).
     body.appendChild(actions);
+    body.appendChild(buildHistDetails(entry, input, comfyEntry, isImg));
+    body.appendChild(meta);
     card.appendChild(body);
     historyEl.appendChild(card);
   }
